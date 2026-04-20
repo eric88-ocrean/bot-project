@@ -126,7 +126,7 @@ def get_top_invites(limit=10):
 # ================= MAIN MENU =================
 def get_main_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔐 Daftar Akaun Baru", url="https://jomjudi88.live/my/")],
+        [InlineKeyboardButton("🔐 Daftar Akaun Baru", url="https://jomjudi88.live/my/register/?referral=JJ27817922")],
         [InlineKeyboardButton("💰 Touch 'n Go RM100", callback_data="menu")],
         [InlineKeyboardButton("🎁 New Customer Gift", callback_data="gift")],
         [InlineKeyboardButton("🔥 Claim ANGPOW FREE Hari-Hari", url="https://jomjudi88.live/my/")],
