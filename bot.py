@@ -1,5 +1,4 @@
 import sqlite3
-import random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
@@ -200,7 +199,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not existing_user:
         valid_referrer = None
 
-        # 条件：推荐人存在、不是自己
         if referrer_id and referrer_id != user_id:
             ref_user = get_user(referrer_id)
             if ref_user:
@@ -258,12 +256,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "profile":
+        username = query.from_user.username
+        username_text = f"@{username}" if username else "❌ No username"
+
         await query.message.reply_text(
-            f"👤 My Profile\n\n"
-            f"ID: {user[0]}\n"
+            f"👤 My Profile\n"
+            f"USERNAME: {username_text}\n\n"
+            f"ID: {user_id}\n\n"
             f"Points: {user[2]}\n"
-            f"Invites: {user[3]}\n"
-            f"Spin Chances: {user[4]}"
+            f"Invites: {user[3]}"
         )
 
     elif query.data == "link":
@@ -313,6 +314,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Please join our Group first.")
             return
 
+        username = query.from_user.username
+        username_text = f"@{username}" if username else "❌ No username"
+
         for admin in ADMIN_IDS:
             try:
                 await context.bot.send_message(
@@ -320,7 +324,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=(
                         f"New Customer Gift Request\n\n"
                         f"User ID: {user_id}\n"
-                        f"Name: {query.from_user.first_name or '-'}"
+                        f"Username: {username_text}\n"
+                        f"Name: {query.from_user.first_name or '-'}\n"
+                        f"User Link: tg://user?id={user_id}"
                     ),
                     reply_markup=InlineKeyboardMarkup([
                         [
@@ -441,10 +447,10 @@ async def all_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["📊 All Users Invite Report\n"]
     for i, row in enumerate(rows, start=1):
-        user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id = row
+        row_user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id = row
         lines.append(
             f"{i}. {name or '-'}\n"
-            f"ID: {user_id}\n"
+            f"ID: {row_user_id}\n"
             f"Invites: {invited_count}\n"
             f"Points: {points}\n"
             f"Spin: {spin_chances}\n"
@@ -454,7 +460,6 @@ async def all_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "\n".join(lines)
 
-    # 避免 Telegram 单条过长
     chunk_size = 3500
     for i in range(0, len(text), chunk_size):
         await update.message.reply_text(text[i:i + chunk_size])
@@ -472,15 +477,16 @@ async def top_invites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["🏆 Top Invite Ranking\n"]
     for i, row in enumerate(rows, start=1):
-        user_id, name, points, invited_count = row
+        row_user_id, name, points, invited_count = row
         lines.append(
             f"{i}. {name or '-'}\n"
-            f"ID: {user_id}\n"
+            f"ID: {row_user_id}\n"
             f"Invites: {invited_count}\n"
             f"Points: {points}\n"
         )
 
     await update.message.reply_text("\n".join(lines))
+
 
 async def is_user_joined(chat_id: str, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
@@ -490,6 +496,8 @@ async def is_user_joined(chat_id: str, user_id: int, context: ContextTypes.DEFAU
     except Exception as e:
         print(f"Gagal semak membership {chat_id}: {e}")
         return False
+
+
 # ================= RUN =================
 init_db()
 
