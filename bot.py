@@ -25,6 +25,17 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS redeem_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        username TEXT,
+        reward_text TEXT NOT NULL,
+        points_needed INTEGER NOT NULL,
+        status TEXT DEFAULT 'pending'
+    )
+    """)
+
     # 兼容旧表：如果没有 referrer_id 字段就自动补上
     cur.execute("PRAGMA table_info(users)")
     columns = [row[1] for row in cur.fetchall()]
@@ -82,6 +93,17 @@ def add_points(user_id, amount):
     conn.close()
 
 
+def deduct_points(user_id, amount):
+    conn = sqlite3.connect("bot.db")
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET points = points - ? WHERE user_id=?",
+        (amount, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
 def add_invite(referrer_id):
     conn = sqlite3.connect("bot.db")
     cur = conn.cursor()
@@ -120,6 +142,43 @@ def get_top_invites(limit=10):
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def create_redeem_request(user_id, username, reward_text, points_needed):
+    conn = sqlite3.connect("bot.db")
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO redeem_requests (user_id, username, reward_text, points_needed, status)
+        VALUES (?, ?, ?, ?, 'pending')
+    """, (user_id, username, reward_text, points_needed))
+    request_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return request_id
+
+
+def get_redeem_request(request_id):
+    conn = sqlite3.connect("bot.db")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, user_id, username, reward_text, points_needed, status
+        FROM redeem_requests
+        WHERE id=?
+    """, (request_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def update_redeem_status(request_id, status):
+    conn = sqlite3.connect("bot.db")
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE redeem_requests SET status=? WHERE id=?",
+        (status, request_id)
+    )
+    conn.commit()
+    conn.close()
 
 
 # ================= MAIN MENU =================
@@ -236,6 +295,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("👤 My Profile", callback_data="profile")],
             [InlineKeyboardButton("🔗 My Referral Link", callback_data="link")],
             [InlineKeyboardButton("👥 Total Invites", callback_data="invite")],
+            [InlineKeyboardButton("🎁 Claim Reward", callback_data="redeem_menu")],
             [InlineKeyboardButton("🔙 Back", callback_data="back")]
         ])
         await query.message.reply_text(
@@ -277,6 +337,195 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             f"👥 Total Invites: {user[3]}"
         )
+
+    elif query.data == "redeem_menu":
+        points = user[2]
+        keyboard_rows = []
+
+        if points >= 10:
+            keyboard_rows.append([InlineKeyboardButton("RM5 Kredit Game (10 Points)", callback_data="redeem_10")])
+        if points >= 20:
+            keyboard_rows.append([InlineKeyboardButton("RM10 Kredit Game (20 Points)", callback_data="redeem_20")])
+        if points >= 50:
+            keyboard_rows.append([InlineKeyboardButton("RM25 Kredit Game (50 Points)", callback_data="redeem_50")])
+        if points >= 100:
+            keyboard_rows.append([InlineKeyboardButton("RM50 Kredit Game (100 Points)", callback_data="redeem_100")])
+        if points >= 200:
+            keyboard_rows.append([InlineKeyboardButton("Touch 'n Go RM100 (200 Points)", callback_data="redeem_200")])
+
+        keyboard_rows.append([InlineKeyboardButton("🔙 Back", callback_data="back")])
+
+        if points < 10:
+            await query.message.reply_text(
+                f"❌ Not enough points to redeem yet.\n\n"
+                f"Your current points: {points}\n"
+                f"Minimum redeem: 10 points"
+            )
+            return
+
+        await query.message.reply_text(
+            f"🎁 Claim Reward\n\n"
+            f"Your current points: {points}\n"
+            f"Select your reward below:",
+            reply_markup=InlineKeyboardMarkup(keyboard_rows)
+        )
+
+    elif query.data.startswith("redeem_"):
+        redeem_map = {
+            "redeem_10": ("RM5 Kredit Game", 10),
+            "redeem_20": ("RM10 Kredit Game", 20),
+            "redeem_50": ("RM25 Kredit Game", 50),
+            "redeem_100": ("RM50 Kredit Game", 100),
+            "redeem_200": ("Touch 'n Go RM100", 200),
+        }
+
+        reward = redeem_map.get(query.data)
+        if not reward:
+            await query.message.reply_text("❌ Invalid reward option.")
+            return
+
+        reward_text, points_needed = reward
+        current_points = user[2]
+
+        if current_points < points_needed:
+            await query.message.reply_text(
+                f"❌ Not enough points.\n\n"
+                f"Your points: {current_points}\n"
+                f"Needed: {points_needed}"
+            )
+            return
+
+        username = query.from_user.username
+        username_text = f"@{username}" if username else "❌ No username"
+
+        request_id = create_redeem_request(
+            user_id=user_id,
+            username=username_text,
+            reward_text=reward_text,
+            points_needed=points_needed
+        )
+
+        for admin in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=int(admin),
+                    text=(
+                        f"🎁 New Redeem Request\n\n"
+                        f"Request ID: {request_id}\n"
+                        f"User ID: {user_id}\n"
+                        f"Username: {username_text}\n"
+                        f"Name: {query.from_user.first_name or '-'}\n"
+                        f"Reward: {reward_text}\n"
+                        f"Points Needed: {points_needed}\n"
+                        f"User Link: tg://user?id={user_id}"
+                    ),
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("Approve", callback_data=f"approve_redeem:{request_id}"),
+                            InlineKeyboardButton("Reject", callback_data=f"reject_redeem:{request_id}")
+                        ]
+                    ])
+                )
+            except Exception as e:
+                print("Failed to send redeem request to admin:", e)
+
+        await query.message.reply_text(
+            f"⏳ Your redeem request has been submitted.\n\n"
+            f"Reward: {reward_text}\n"
+            f"Points Needed: {points_needed}"
+        )
+
+    elif query.data.startswith("approve_redeem:"):
+        if str(query.from_user.id) not in ADMIN_IDS:
+            await query.message.reply_text("❌ Admin only.")
+            return
+
+        request_id = int(query.data.split(":", 1)[1])
+        req = get_redeem_request(request_id)
+
+        if not req:
+            await query.message.reply_text("❌ Redeem request not found.")
+            return
+
+        _, target_user_id, username, reward_text, points_needed, status = req
+
+        if status != "pending":
+            await query.message.reply_text(f"⚠️ This request has already been processed: {status}")
+            return
+
+        target_user = get_user(target_user_id)
+        if not target_user:
+            await query.message.reply_text("❌ User not found.")
+            return
+
+        current_points = target_user[2]
+        if current_points < points_needed:
+            await query.message.reply_text(
+                f"❌ User does not have enough points.\n\n"
+                f"Current: {current_points}\n"
+                f"Needed: {points_needed}"
+            )
+            return
+
+        deduct_points(target_user_id, points_needed)
+        update_redeem_status(request_id, "approved")
+
+        await query.edit_message_text(
+            f"✅ Redeem approved\n\n"
+            f"Request ID: {request_id}\n"
+            f"User: {username}\n"
+            f"Reward: {reward_text}"
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(target_user_id),
+                text=(
+                    f"✅ Your redeem request has been approved!\n\n"
+                    f"Reward: {reward_text}\n"
+                    f"Points deducted: {points_needed}"
+                )
+            )
+        except Exception as e:
+            print("Failed to notify user redeem approved:", e)
+
+    elif query.data.startswith("reject_redeem:"):
+        if str(query.from_user.id) not in ADMIN_IDS:
+            await query.message.reply_text("❌ Admin only.")
+            return
+
+        request_id = int(query.data.split(":", 1)[1])
+        req = get_redeem_request(request_id)
+
+        if not req:
+            await query.message.reply_text("❌ Redeem request not found.")
+            return
+
+        _, target_user_id, username, reward_text, points_needed, status = req
+
+        if status != "pending":
+            await query.message.reply_text(f"⚠️ This request has already been processed: {status}")
+            return
+
+        update_redeem_status(request_id, "rejected")
+
+        await query.edit_message_text(
+            f"❌ Redeem rejected\n\n"
+            f"Request ID: {request_id}\n"
+            f"User: {username}\n"
+            f"Reward: {reward_text}"
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(target_user_id),
+                text=(
+                    f"❌ Your redeem request was rejected.\n\n"
+                    f"Reward: {reward_text}"
+                )
+            )
+        except Exception as e:
+            print("Failed to notify user redeem rejected:", e)
 
     elif query.data == "gift":
         if user[5] == 1:
