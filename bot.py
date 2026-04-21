@@ -1,5 +1,4 @@
 import sqlite3
-import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
@@ -37,15 +36,11 @@ def init_db():
     )
     """)
 
-    # 兼容旧表字段
+    # 兼容旧表：如果没有 referrer_id 字段就自动补上
     cur.execute("PRAGMA table_info(users)")
     columns = [row[1] for row in cur.fetchall()]
-
     if "referrer_id" not in columns:
         cur.execute("ALTER TABLE users ADD COLUMN referrer_id TEXT")
-
-    if "broadcast_enabled" not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN broadcast_enabled INTEGER DEFAULT 1")
 
     conn.commit()
     conn.close()
@@ -55,7 +50,7 @@ def get_user(user_id):
     conn = sqlite3.connect("bot.db")
     cur = conn.cursor()
     cur.execute("""
-        SELECT user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id, broadcast_enabled
+        SELECT user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id
         FROM users
         WHERE user_id=?
     """, (user_id,))
@@ -69,8 +64,8 @@ def create_user(user_id, name, referrer_id=None):
     cur = conn.cursor()
     cur.execute("""
         INSERT OR IGNORE INTO users
-        (user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id, broadcast_enabled)
-        VALUES (?, ?, 0, 0, 0, 0, ?, 1)
+        (user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id)
+        VALUES (?, ?, 0, 0, 0, 0, ?)
     """, (user_id, name, referrer_id))
     conn.commit()
     conn.close()
@@ -122,35 +117,11 @@ def add_invite(referrer_id):
     conn.close()
 
 
-def set_broadcast(user_id, enabled):
-    conn = sqlite3.connect("bot.db")
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET broadcast_enabled=? WHERE user_id=?",
-        (enabled, user_id)
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_broadcast_users():
-    conn = sqlite3.connect("bot.db")
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT user_id
-        FROM users
-        WHERE broadcast_enabled = 1
-    """)
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
 def get_all_users():
     conn = sqlite3.connect("bot.db")
     cur = conn.cursor()
     cur.execute("""
-        SELECT user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id, broadcast_enabled
+        SELECT user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id
         FROM users
         ORDER BY invited_count DESC, points DESC, name ASC
     """)
@@ -220,10 +191,6 @@ def get_main_keyboard():
         [
             InlineKeyboardButton("📢 Sertai Channel", url="https://t.me/jomjudi88cuci"),
             InlineKeyboardButton("👥 Sertai Group", url="https://t.me/jomjudi88official")
-        ],
-        [
-            InlineKeyboardButton("🔕 Stop Promo", callback_data="unsubscribe"),
-            InlineKeyboardButton("🔔 Enable Promo", callback_data="subscribe")
         ],
         [InlineKeyboardButton("🎧 Hubungi Support", callback_data="support")]
     ])
@@ -683,21 +650,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    elif query.data == "unsubscribe":
-        set_broadcast(user_id, 0)
-        await query.message.reply_text(
-            "🔕 Promotional messages have been disabled.\n\n"
-            "You will no longer receive broadcast messages.\n"
-            "To enable again, tap 'Enable Promo' or type /start_broadcast"
-        )
-
-    elif query.data == "subscribe":
-        set_broadcast(user_id, 1)
-        await query.message.reply_text(
-            "🔔 Promotional messages enabled.\n\n"
-            "You will receive latest promo broadcasts again."
-        )
-
     elif query.data == "support":
         await query.message.reply_text(
             "🎧 Need help? Please contact our support team.\n\n"
@@ -744,7 +696,7 @@ async def all_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["📊 All Users Invite Report\n"]
     for i, row in enumerate(rows, start=1):
-        row_user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id, broadcast_enabled = row
+        row_user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id = row
         lines.append(
             f"{i}. {name or '-'}\n"
             f"ID: {row_user_id}\n"
@@ -752,7 +704,6 @@ async def all_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Points: {points}\n"
             f"Spin: {spin_chances}\n"
             f"Gift Claimed: {'Yes' if gift_claimed else 'No'}\n"
-            f"Broadcast: {'On' if broadcast_enabled else 'Off'}\n"
             f"Referrer: {referrer_id or '-'}\n"
         )
 
@@ -786,79 +737,6 @@ async def top_invites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) not in ADMIN_IDS:
-        await update.message.reply_text("❌ Admin only.")
-        return
-
-    if not context.args:
-        await update.message.reply_text("Usage: /broadcast Your message here")
-        return
-
-    message = " ".join(context.args)
-    users = get_broadcast_users()
-
-    success = 0
-    failed = 0
-    batch_size = 20
-    pause_seconds = 2
-
-    await update.message.reply_text(
-        f"🚀 Starting broadcast to {len(users)} subscribed users..."
-    )
-
-    final_message = (
-        f"{message}\n\n"
-        f"🔕 To stop promo messages, tap 'Stop Promo' in the main menu or type /stop"
-    )
-
-    for i, user_row in enumerate(users, start=1):
-        target_user_id = user_row[0]
-        try:
-            await context.bot.send_message(
-                chat_id=int(target_user_id),
-                text=final_message
-            )
-            success += 1
-        except Exception as e:
-            print(f"Broadcast failed for {target_user_id}: {e}")
-            failed += 1
-
-        if i % batch_size == 0:
-            await asyncio.sleep(pause_seconds)
-
-    await update.message.reply_text(
-        f"✅ Broadcast finished.\n\nSuccess: {success}\nFailed: {failed}"
-    )
-
-
-async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    user = get_user(user_id)
-
-    if not user:
-        create_user(user_id, update.effective_user.first_name or "")
-    set_broadcast(user_id, 0)
-
-    await update.message.reply_text(
-        "🔕 Promotional messages have been disabled.\n\n"
-        "Type /start_broadcast to enable again."
-    )
-
-
-async def start_broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    user = get_user(user_id)
-
-    if not user:
-        create_user(user_id, update.effective_user.first_name or "")
-    set_broadcast(user_id, 1)
-
-    await update.message.reply_text(
-        "🔔 Broadcast enabled! You will receive latest promotions again."
-    )
-
-
 async def is_user_joined(chat_id: str, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
         member = await context.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
@@ -878,9 +756,6 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("add_spin", add_spin_cmd))
 app.add_handler(CommandHandler("all_users", all_users_cmd))
 app.add_handler(CommandHandler("top_invites", top_invites_cmd))
-app.add_handler(CommandHandler("broadcast", broadcast_cmd))
-app.add_handler(CommandHandler("stop", stop_cmd))
-app.add_handler(CommandHandler("start_broadcast", start_broadcast_cmd))
 app.add_handler(CallbackQueryHandler(button))
 
 print("Bot running...")
