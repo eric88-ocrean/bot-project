@@ -184,16 +184,22 @@ def update_redeem_status(request_id, status):
 # ================= MAIN MENU =================
 def get_main_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔐 Daftar Akaun Baru", url="https://jomjudi88.live/my/register/?referral=JJ27817922")],
-        [InlineKeyboardButton("💰 Touch 'n Go RM100", callback_data="menu")],
-        [InlineKeyboardButton("🎁 New Customer Gift", callback_data="gift")],
-        [InlineKeyboardButton("🔥 Claim ANGPOW FREE Hari-Hari", url="https://jomjudi88.live/my/")],
+        [
+            InlineKeyboardButton("🔐 Daftar Akaun Baru", url="https://jomjudi88.live/my/register/?referral=JJ27817922"),
+            InlineKeyboardButton("💰 Touch 'n Go RM100", callback_data="menu")
+        ],
+        [
+            InlineKeyboardButton("🎁 New Customer Gift", callback_data="gift"),
+            InlineKeyboardButton("🔥 Claim ANGPOW FREE Hari-Hari", url="https://jomjudi88.live/my/")
+        ],
         [
             InlineKeyboardButton("📢 Sertai Channel", url="https://t.me/jomjudi88cuci"),
             InlineKeyboardButton("👥 Sertai Group", url="https://t.me/jomjudi88official")
         ],
-        [InlineKeyboardButton("🔞 Amoi Manja Mantap", url="https://t.me/JomJManja_bot")],
-        [InlineKeyboardButton("🎧 Hubungi Support", callback_data="support")]
+        [
+            InlineKeyboardButton("🔞 Amoi Manja Mantap", url="https://t.me/JomJManja_bot"),
+            InlineKeyboardButton("🎧 Hubungi Support", callback_data="support")
+        ]
     ])
 
 
