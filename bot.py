@@ -192,6 +192,7 @@ def get_main_keyboard():
             InlineKeyboardButton("📢 Sertai Channel", url="https://t.me/jomjudi88cuci"),
             InlineKeyboardButton("👥 Sertai Group", url="https://t.me/jomjudi88official")
         ],
+        [InlineKeyboardButton("🔞 Amoi Manja Mantap", url="https://t.me/JomJManja_bot")],
         [InlineKeyboardButton("🎧 Hubungi Support", callback_data="support")]
     ])
 
