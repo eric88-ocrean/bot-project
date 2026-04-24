@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-TOKEN = os.getenv("8625949012:AAE8Z8KnLRIdqC9GjdvXcqdyUR5zh77SA3c")
+TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = "JomJudi_bot"
 ADMIN_IDS = {"909399622"}
 CHANNEL_ID = "@jomjudi88cuci"
