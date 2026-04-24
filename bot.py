@@ -1,16 +1,31 @@
-import sqlite3
+import os
+import psycopg2
+from urllib.parse import urlparse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-TOKEN = "8625949012:AAE8Z8KnLRIdqC9GjdvXcqdyUR5zh77SA3c"
+TOKEN = os.getenv("8625949012:AAE8Z8KnLRIdqC9GjdvXcqdyUR5zh77SA3c")
 BOT_USERNAME = "JomJudi_bot"
 ADMIN_IDS = {"909399622"}
 CHANNEL_ID = "@jomjudi88cuci"
 GROUP_ID = "@jomjudi88official"
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is missing. Set BOT_TOKEN in Railway Variables.")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is missing. Add Railway PostgreSQL and set DATABASE_URL.")
+
+
 # ================= DB =================
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
+
+
 def init_db():
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("""
@@ -27,7 +42,7 @@ def init_db():
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS redeem_requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,
         username TEXT,
         reward_text TEXT NOT NULL,
@@ -36,89 +51,91 @@ def init_db():
     )
     """)
 
-    # 兼容旧表：如果没有 referrer_id 字段就自动补上
-    cur.execute("PRAGMA table_info(users)")
-    columns = [row[1] for row in cur.fetchall()]
-    if "referrer_id" not in columns:
-        cur.execute("ALTER TABLE users ADD COLUMN referrer_id TEXT")
-
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def get_user(user_id):
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id
         FROM users
-        WHERE user_id=?
+        WHERE user_id=%s
     """, (user_id,))
     user = cur.fetchone()
+    cur.close()
     conn.close()
     return user
 
 
 def create_user(user_id, name, referrer_id=None):
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT OR IGNORE INTO users
+        INSERT INTO users
         (user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id)
-        VALUES (?, ?, 0, 0, 0, 0, ?)
+        VALUES (%s, %s, 0, 0, 0, 0, %s)
+        ON CONFLICT (user_id) DO NOTHING
     """, (user_id, name, referrer_id))
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def add_spin(user_id, amount):
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE users SET spin_chances = spin_chances + ? WHERE user_id=?",
+        "UPDATE users SET spin_chances = spin_chances + %s WHERE user_id=%s",
         (amount, user_id)
     )
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def add_points(user_id, amount):
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE users SET points = points + ? WHERE user_id=?",
+        "UPDATE users SET points = points + %s WHERE user_id=%s",
         (amount, user_id)
     )
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def deduct_points(user_id, amount):
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE users SET points = points - ? WHERE user_id=?",
+        "UPDATE users SET points = points - %s WHERE user_id=%s",
         (amount, user_id)
     )
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def add_invite(referrer_id):
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         UPDATE users
         SET invited_count = invited_count + 1,
             points = points + 1
-        WHERE user_id=?
+        WHERE user_id=%s
     """, (referrer_id,))
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def get_all_users():
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id
@@ -126,58 +143,73 @@ def get_all_users():
         ORDER BY invited_count DESC, points DESC, name ASC
     """)
     rows = cur.fetchall()
+    cur.close()
     conn.close()
     return rows
 
 
 def get_top_invites(limit=10):
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT user_id, name, points, invited_count
         FROM users
         ORDER BY invited_count DESC, points DESC
-        LIMIT ?
+        LIMIT %s
     """, (limit,))
     rows = cur.fetchall()
+    cur.close()
     conn.close()
     return rows
 
 
 def create_redeem_request(user_id, username, reward_text, points_needed):
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO redeem_requests (user_id, username, reward_text, points_needed, status)
-        VALUES (?, ?, ?, ?, 'pending')
+        VALUES (%s, %s, %s, %s, 'pending')
+        RETURNING id
     """, (user_id, username, reward_text, points_needed))
-    request_id = cur.lastrowid
+    request_id = cur.fetchone()[0]
     conn.commit()
+    cur.close()
     conn.close()
     return request_id
 
 
 def get_redeem_request(request_id):
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT id, user_id, username, reward_text, points_needed, status
         FROM redeem_requests
-        WHERE id=?
+        WHERE id=%s
     """, (request_id,))
     row = cur.fetchone()
+    cur.close()
     conn.close()
     return row
 
 
 def update_redeem_status(request_id, status):
-    conn = sqlite3.connect("bot.db")
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE redeem_requests SET status=? WHERE id=?",
+        "UPDATE redeem_requests SET status=%s WHERE id=%s",
         (status, request_id)
     )
     conn.commit()
+    cur.close()
+    conn.close()
+
+
+def mark_gift_claimed(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET gift_claimed=1 WHERE user_id=%s", (user_id,))
+    conn.commit()
+    cur.close()
     conn.close()
 
 
@@ -256,10 +288,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(user.id)
     user_name = user.first_name or ""
 
-    referrer_id = None
-    if context.args:
-        referrer_id = context.args[0]
-
+    referrer_id = context.args[0] if context.args else None
     existing_user = get_user(user_id)
 
     if not existing_user:
@@ -336,14 +365,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "link":
         link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-        await query.message.reply_text(
-            f"🔗 Your Referral Link:\n\n{link}"
-        )
+        await query.message.reply_text(f"🔗 Your Referral Link:\n\n{link}")
 
     elif query.data == "invite":
-        await query.message.reply_text(
-            f"👥 Total Invites: {user[3]}"
-        )
+        await query.message.reply_text(f"👥 Total Invites: {user[3]}")
 
     elif query.data == "redeem_menu":
         points = user[2]
@@ -536,9 +561,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "gift":
         if user[5] == 1:
-            await query.message.reply_text(
-                "❌ You have already claimed this gift."
-            )
+            await query.message.reply_text("❌ You have already claimed this gift.")
         else:
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("Claim Gift", callback_data="claim_gift")],
@@ -594,9 +617,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 print("Error:", e)
 
-        await query.message.reply_text(
-            "⏳ Your request has been submitted for review."
-        )
+        await query.message.reply_text("⏳ Your request has been submitted for review.")
 
     elif query.data.startswith("approve_gift:"):
         if str(query.from_user.id) not in ADMIN_IDS:
@@ -615,16 +636,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         add_points(target, 38)
+        mark_gift_claimed(target)
 
-        conn = sqlite3.connect("bot.db")
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET gift_claimed=1 WHERE user_id=?", (target,))
-        conn.commit()
-        conn.close()
-
-        await query.edit_message_text(
-            f"✅ Gift approved for user {target}"
-        )
+        await query.edit_message_text(f"✅ Gift approved for user {target}")
 
         try:
             await context.bot.send_message(
@@ -645,9 +659,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         target = query.data.split(":", 1)[1]
 
-        await query.edit_message_text(
-            f"❌ Gift request rejected for user {target}"
-        )
+        await query.edit_message_text(f"❌ Gift request rejected for user {target}")
 
         try:
             await context.bot.send_message(
@@ -765,5 +777,5 @@ app.add_handler(CommandHandler("all_users", all_users_cmd))
 app.add_handler(CommandHandler("top_invites", top_invites_cmd))
 app.add_handler(CallbackQueryHandler(button))
 
-print("Bot running...")
+print("Bot running with Railway PostgreSQL...")
 app.run_polling()
