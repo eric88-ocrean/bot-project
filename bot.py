@@ -403,8 +403,8 @@ def get_main_text():
 
 async def safe_edit(query, text, reply_markup=None):
     try:
-        await query.edit_message_text(
-            text=text,
+        await query.edit_message_caption(
+            caption=text,
             reply_markup=reply_markup
         )
     except Exception as e:
