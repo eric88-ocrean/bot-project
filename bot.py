@@ -378,8 +378,7 @@ def get_main_keyboard():
 
 def get_main_text():
     return (
-        "🎁 Welcome to JomJudi88 Bot Rewards 🔥\n"
-        "https://jomjudi88.live/my/\n\n"
+        "🎁 Welcome to JomJudi88 Bot Rewards 🔥\n\n"
 
         "🚀 Sistem Reward & Bonus untuk player Malaysia 🇲🇾\n\n"
 
@@ -387,11 +386,6 @@ def get_main_text():
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        "🎁 Lucky Reward\n"
-        "🔥 VIP Reward\n"
-        "👑 Elite Reward\n\n"
-
-        "✅ Daily free reward\n"
         "✅ Invite & unlock VIP rewards\n"
         "✅ Claim points & redeem hadiah\n"
         "✅ Touch 'n Go RM100\n"
@@ -401,13 +395,11 @@ def get_main_text():
 
         "🧠 Sistem Auto Layan Diri\n"
         "✔️ Deposit & withdraw auto\n"
-        "✔️ Transaksi real-time\n"
         "✔️ Support 24/7\n"
         "✔️ Privasi terjamin 🔐\n\n"
 
         "👇 Pilih menu di bawah untuk mula"
     )
-
 
 async def safe_edit(query, text, reply_markup=None):
     try:
