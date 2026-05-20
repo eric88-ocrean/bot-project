@@ -378,12 +378,34 @@ def get_main_keyboard():
 
 def get_main_text():
     return (
-        "🎁 Welcome Bonus Center 🎁\n\n"
-        "💸 Complete missions & earn rewards instantly!\n\n"
-        "✅ Join Channel = +1 Point\n"
-        "✅ Join Group = +1 Point\n"
-        "✅ Invite Friends = +1 Point\n\n"
-        "🔥 Daily Lucky Rewards Available"
+        "🎁 Welcome to JomJudi88 Bot Rewards 🔥\n"
+        "https://jomjudi88.live/my/\n\n"
+
+        "🚀 Sistem Reward & Bonus untuk player Malaysia 🇲🇾\n\n"
+
+        "💸 Main sambil collect reward setiap hari!\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "🎁 Lucky Reward\n"
+        "🔥 VIP Reward\n"
+        "👑 Elite Reward\n\n"
+
+        "✅ Daily free reward\n"
+        "✅ Invite & unlock VIP rewards\n"
+        "✅ Claim points & redeem hadiah\n"
+        "✅ Touch 'n Go RM100\n"
+        "✅ Reward update setiap hari\n\n"
+
+        "━━━━━━━━━━━━━━\n\n"
+
+        "🧠 Sistem Auto Layan Diri\n"
+        "✔️ Deposit & withdraw auto\n"
+        "✔️ Transaksi real-time\n"
+        "✔️ Support 24/7\n"
+        "✔️ Privasi terjamin 🔐\n\n"
+
+        "👇 Pilih menu di bawah untuk mula"
     )
 
 
@@ -461,7 +483,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "menu":
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📈 My Progress", callback_data="profile")],
+            [InlineKeyboardButton("💎 Your Rewards", callback_data="profile")],
             [InlineKeyboardButton("💰 Share & Earn", callback_data="link")],
             [InlineKeyboardButton("🎯 Missions", callback_data="missions")],
             [InlineKeyboardButton("🎁 Claim Reward", callback_data="redeem_menu")],
@@ -471,22 +493,45 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await safe_edit(
             query,
-            "💰 Earn Rewards Center\n\n"
-            "Invite friends & collect rewards.",
+            "💰 Rewards Center\n\n"
+
+            "🎁 Complete missions\n"
+            "🔥 Unlock VIP rewards\n"
+            "💸 Collect points & claim hadiah setiap hari\n\n"
+
+            "💰 Claim Touch'N Go FREE RM100\n\n"
+
+            "Syarat untuk claim reward:\n\n"
+
+            "• Mesti ada akaun berdaftar di JomJudi88\n"
+            "• Share referral link ke Facebook / Telegram / kawan-kawan\n"
+            "  (1 referral = 1 point)\n\n"
+
+            "🎁 Ganjaran:\n\n"
+
+            "• 3 Point = RM1 Kredit Game\n"
+            "• 10 Point = RM5 Kredit Game\n"
+            "• 20 Point = RM10 Kredit Game\n"
+            "• 50 Point = RM25 Kredit Game\n"
+            "• 100 Point = RM50 Kredit Game\n"
+            "• 200 Point = Touch 'n Go RM100\n\n"
+
+            "👇 Select an option below:",
             keyboard
         )
 
     elif query.data == "profile":
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data="menu")]
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu")]
         ])
 
         await safe_edit(
             query,
-            f"📈 My Progress\n\n"
-            f"⭐ Points: {user[2]}\n"
-            f"👥 Invites: {user[3]}",
+            f"💎 Your Rewards\n\n"
+            f"⭐️ Reward Points: {user[2]}\n"
+            f"👥 Friends Referred: {user[3]}\n\n"
+            f"----------------------------------------",
             keyboard
         )
 
@@ -500,8 +545,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await safe_edit(
             query,
-            f"💰 Share & Earn\n\n"
-            f"🔗 Your Referral Link:\n\n{link}",
+            f"💰 Share & Earn Lagi!\n\n"
+            f"Jom ajak kawan join & collect reward sama-sama 🔥\n\n"
+            f"🔗 Link Boss:\n\n{link}",
             keyboard
         )
 
@@ -691,14 +737,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)],
             [InlineKeyboardButton("👥 Join Group", url=GROUP_URL)],
-            [InlineKeyboardButton("✅ Check Missions", callback_data="check_missions")],
+            [InlineKeyboardButton("✅ Done Join", callback_data="check_missions")],
             [InlineKeyboardButton("🔙 Back", callback_data="menu")]
         ])
 
         await safe_edit(
             query,
             "🎯 Missions\n\n"
-            "Join Channel & Group to earn points.",
+            "Jom complete mission & collect reward 🔥",
             keyboard
         )
 
