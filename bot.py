@@ -438,50 +438,78 @@ def random_reward(pool):
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    user = update.effective_user
-
-    user_id = str(user.id)
-    user_name = user.first_name or ""
-
-    referrer_id = context.args[0] if context.args else None
-
-    existing = get_user(user_id)
-
-    if not existing:
-
-        valid_referrer = None
-
-        if referrer_id and referrer_id != user_id:
-            ref_user = get_user(referrer_id)
-
-            if ref_user:
-                valid_referrer = referrer_id
-
-        create_user(user_id, user_name, valid_referrer)
-
-        if valid_referrer:
-            add_invite(valid_referrer)
-
     try:
 
-        with open("banner.jpg", "rb") as photo:
+        user = update.effective_user
 
-            await context.bot.send_photo(
+        user_id = str(user.id)
+        user_name = user.first_name or "User"
+
+        referrer_id = None
+
+        if context.args:
+            try:
+                referrer_id = str(context.args[0])
+            except:
+                referrer_id = None
+
+        existing = get_user(user_id)
+
+        if not existing:
+
+            valid_referrer = None
+
+            if referrer_id and referrer_id != user_id:
+
+                try:
+                    ref_user = get_user(referrer_id)
+
+                    if ref_user:
+                        valid_referrer = referrer_id
+
+                except Exception as e:
+                    print(f"Referrer Error: {e}")
+
+            try:
+                create_user(user_id, user_name, valid_referrer)
+
+                if valid_referrer:
+                    add_invite(valid_referrer)
+
+            except Exception as e:
+                print(f"Create User Error: {e}")
+
+        try:
+
+            with open("banner.jpg", "rb") as photo:
+
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=photo,
+                    caption=get_main_text(),
+                    reply_markup=get_main_keyboard()
+                )
+
+        except Exception as e:
+
+            print(f"Banner Error: {e}")
+
+            await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                photo=photo,
-                caption=get_main_text(),
+                text=get_main_text(),
                 reply_markup=get_main_keyboard()
             )
 
     except Exception as e:
 
-        print(f"Banner Error: {e}")
+        print(f"START ERROR: {e}")
 
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=get_main_text(),
-            reply_markup=get_main_keyboard()
-        )
+        try:
+            await update.message.reply_text(
+                "Bot temporarily busy. Please press /start again."
+            )
+        except:
+            pass
 
 
 async def is_user_joined(chat_id, user_id, context):
