@@ -462,11 +462,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if valid_referrer:
             add_invite(valid_referrer)
 
-    with open("banner.jpg", "rb") as photo:
-        await context.bot.send_photo(
+    try:
+
+        with open("banner.jpg", "rb") as photo:
+
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=photo,
+                caption=get_main_text(),
+                reply_markup=get_main_keyboard()
+            )
+
+    except Exception as e:
+
+        print(f"Banner Error: {e}")
+
+        await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            photo=photo,
-            caption=get_main_text(),
+            text=get_main_text(),
             reply_markup=get_main_keyboard()
         )
 
