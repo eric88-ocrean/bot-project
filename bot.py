@@ -583,14 +583,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🎁 Lucky Reward\n"
             "🔓 Semua boleh claim\n\n"
 
-            "⭐ Random Points:\n\n"
+            "⭐️ Random Points:\n"
+            "+1 • +2 •\n\n"
 
             "━━━━━━━━━━━━━━\n\n"
 
             "🔥 VIP Reward\n"
             "🔒 Unlock 5 invites\n\n"
 
-            "⭐ Better Rewards:\n"
+            "⭐️ Better Rewards:\n"
             "+1 • +3 • +10\n\n"
 
             "━━━━━━━━━━━━━━\n\n"
@@ -633,6 +634,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
         update_claim(user_id, "lucky")
+        user = get_user(user_id)
 
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
@@ -643,14 +645,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await safe_edit(
                 query,
-                f"🎉 Lucky Reward Opened!\n\n"
-                f"⭐ +{reward} Points Added",
+                f"🎉 Reward Berjaya Dibuka!\n\n"
+                f"⭐ +{reward} Points masuk 🔥",
                 keyboard
             )
         else:
             await safe_edit(
                 query,
-                "❌ Better luck tomorrow!",
+                "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥",
                 keyboard
             )
 
@@ -680,7 +682,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         invites = user[3]
 
-        if invites < 5 and not is_admin(user_id):
+        if invites < 5:
 
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
@@ -715,18 +717,29 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
         update_claim(user_id, "vip")
+        user = get_user(user_id)
         add_points(user_id, reward)
 
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
         ])
 
-        await safe_edit(
-            query,
-            f"🔥 VIP Reward Opened!\n\n"
-            f"⭐ +{reward} Points Added",
-            keyboard
-        )
+        if reward > 0:
+
+            await safe_edit(
+                query,
+                f"🎉 Reward Berjaya Dibuka!\n\n"
+                f"⭐ +{reward} Points masuk 🔥",
+                keyboard
+            )
+
+        else:
+
+            await safe_edit(
+                query,
+                "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥",
+                keyboard
+            )
 
     # ================= ELITE REWARD =================
     elif query.data == "elite_reward":
@@ -754,7 +767,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         invites = user[3]
 
-        if invites < 20 and not is_admin(user_id):
+        if invites < 20:
 
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
@@ -789,18 +802,29 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
         update_claim(user_id, "elite")
+        user = get_user(user_id)
         add_points(user_id, reward)
 
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
         ])
 
-        await safe_edit(
-            query,
-            f"👑 Elite Reward Opened!\n\n"
-            f"🔥 +{reward} Points Added",
-            keyboard
-        )
+        if reward > 0:
+
+            await safe_edit(
+                query,
+                f"🎉 Reward Berjaya Dibuka!\n\n"
+                f"⭐ +{reward} Points masuk 🔥",
+                keyboard
+            )
+
+        else:
+
+            await safe_edit(
+                query,
+                "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥",
+                keyboard
+            )
 
     # ================= MISSIONS =================
     elif query.data == "missions":
