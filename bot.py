@@ -685,12 +685,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "+1 • +5 • +15"
         )
 
-        # FIX: use NEW text message instead of photo edit
-        try:
-            await query.message.delete()
-        except:
-            pass
-
+        # FIX: keep homepage banner, open stable text panel
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=reward_text,
@@ -1017,12 +1012,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔙 Back", callback_data="menu")
         ])
 
-        # FIX: use NEW text message instead of photo edit
-        try:
-            await query.message.delete()
-        except:
-            pass
-
+        # FIX: keep homepage banner, open stable text panel
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=f"🎁 Claim Reward\n\n⭐ Your Points: {points}",
