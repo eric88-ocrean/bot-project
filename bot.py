@@ -447,11 +447,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if valid_referrer:
             add_invite(valid_referrer)
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=get_main_text(),
-        reply_markup=get_main_keyboard()
-    )
+    with open("banner.jpg", "rb") as photo:
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=photo,
+            caption=get_main_text(),
+            reply_markup=get_main_keyboard()
+        )
 
 
 async def is_user_joined(chat_id, user_id, context):
