@@ -565,9 +565,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
     try:
-        await query.answer()
-    except:
-        pass
+        await query.answer(cache_time=0)
+    except Exception as e:
+        print(f"ANSWER ERROR: {e}")
 
     await asyncio.sleep(0.2)
 
@@ -685,12 +685,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "+1 • +5 • +15"
         )
 
-        # FIX: keep homepage banner, open stable text panel
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
+        # STABLE PANEL UI
+        await query.message.reply_text(
             text=reward_text,
             reply_markup=keyboard
         )
+
+        return
 
     # ================= NORMAL REWARD =================
     elif query.data == "lucky_reward":
@@ -1012,12 +1013,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔙 Back", callback_data="menu")
         ])
 
-        # FIX: keep homepage banner, open stable text panel
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
+        # STABLE PANEL UI
+        await query.message.reply_text(
             text=f"🎁 Claim Reward\n\n⭐ Your Points: {points}",
             reply_markup=InlineKeyboardMarkup(keyboard_rows)
         )
+
+        return
 
     elif query.data.startswith("redeem:"):
 
