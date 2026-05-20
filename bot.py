@@ -32,6 +32,11 @@ BOT_USERNAME = "JomJudi_bot"
 
 ADMIN_IDS = {"909399622"}
 
+
+def is_admin(user_id):
+    return str(user_id) in ADMIN_IDS
+
+
 CHANNEL_ID = "@jomjudi88cuci"
 GROUP_ID = "@jomjudi88official"
 
@@ -345,11 +350,11 @@ def get_main_keyboard():
         ],
         [
             InlineKeyboardButton(
-                "🎁 Claim Credit",
+                "🎁 New Join Free RM38",
                 callback_data="gift"
             ),
             InlineKeyboardButton(
-                "🎁 Lucky Reward",
+                "🎁 Daily Check In",
                 callback_data="reward_center"
             )
         ],
@@ -402,11 +407,21 @@ def get_main_text():
     )
 
 async def safe_edit(query, text, reply_markup=None):
+
     try:
-        await query.edit_message_caption(
-            caption=text,
-            reply_markup=reply_markup
-        )
+
+        if query.message.photo:
+            await query.edit_message_caption(
+                caption=text,
+                reply_markup=reply_markup
+            )
+
+        else:
+            await query.edit_message_text(
+                text=text,
+                reply_markup=reply_markup
+            )
+
     except Exception as e:
         print(e)
 
@@ -481,8 +496,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💰 Share & Earn", callback_data="link")],
             [InlineKeyboardButton("🎯 Missions", callback_data="missions")],
             [InlineKeyboardButton("🎁 Claim Reward", callback_data="redeem_menu")],
-            [InlineKeyboardButton("🏆 Top Ranking", callback_data="ranking")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back")]
+                        [InlineKeyboardButton("🔙 Back", callback_data="back")]
         ])
 
         await safe_edit(
@@ -562,10 +576,30 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await safe_edit(
             query,
-            f"🎁 Reward Center\n\n"
-            f"🎁 Lucky Reward\nDaily free reward\n\n"
-            f"🔥 VIP Reward\n{vip_status}\n\n"
-            f"👑 Elite Reward\n{elite_status}",
+            "⏰ Reset setiap hari 12AM\n\n"
+
+            "━━━━━━━━━━━━━━\n\n"
+
+            "🎁 Lucky Reward\n"
+            "🔓 Semua boleh claim\n\n"
+
+            "⭐ Random Points:\n\n"
+
+            "━━━━━━━━━━━━━━\n\n"
+
+            "🔥 VIP Reward\n"
+            "🔒 Unlock 5 invites\n\n"
+
+            "⭐ Better Rewards:\n"
+            "+1 • +3 • +10\n\n"
+
+            "━━━━━━━━━━━━━━\n\n"
+
+            "👑 Elite Reward\n"
+            "🔒 Unlock 20 invites\n\n"
+
+            "💎 Big Rewards:\n"
+            "+1 • +5 • +15",
             keyboard
         )
 
@@ -574,7 +608,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         today = datetime.now().strftime("%Y-%m-%d")
 
-        if user[8] == today:
+        if (
+            not is_admin(user_id) and (
+                user[8] == today or
+                user[9] == today or
+                user[10] == today
+            )
+        ):
 
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
@@ -589,10 +629,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reward = random_reward([
             (0, 40),
-            (1, 35),
-            (2, 15),
-            (5, 8),
-            (10, 2)
+            (1, 60)
         ])
 
         update_claim(user_id, "lucky")
@@ -620,9 +657,30 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ================= VIP REWARD =================
     elif query.data == "vip_reward":
 
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        if (
+            not is_admin(user_id) and (
+                user[8] == today or
+                user[9] == today or
+                user[10] == today
+            )
+        ):
+
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
+            ])
+
+            await safe_edit(
+                query,
+                "❌ You already claimed today's reward.",
+                keyboard
+            )
+            return
+
         invites = user[3]
 
-        if invites < 5:
+        if invites < 5 and not is_admin(user_id):
 
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
@@ -651,10 +709,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         reward = random_reward([
-            (2, 40),
-            (5, 35),
-            (10, 20),
-            (20, 5)
+            (0, 30),
+            (1, 65),
+            (3, 5)
         ])
 
         update_claim(user_id, "vip")
@@ -674,9 +731,30 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ================= ELITE REWARD =================
     elif query.data == "elite_reward":
 
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        if (
+            not is_admin(user_id) and (
+                user[8] == today or
+                user[9] == today or
+                user[10] == today
+            )
+        ):
+
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
+            ])
+
+            await safe_edit(
+                query,
+                "❌ You already claimed today's reward.",
+                keyboard
+            )
+            return
+
         invites = user[3]
 
-        if invites < 20:
+        if invites < 20 and not is_admin(user_id):
 
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
@@ -705,10 +783,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         reward = random_reward([
-            (5, 35),
-            (10, 35),
-            (20, 20),
-            (50, 10)
+            (0, 30),
+            (1, 67),
+            (5, 3)
         ])
 
         update_claim(user_id, "elite")
@@ -865,9 +942,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=int(admin),
                     text=(
                         f"🎁 New Redeem Request\n\n"
-                        f"User ID: {user_id}\n"
-                        f"Reward: {reward_text}\n"
-                        f"Points: {pts}"
+                        f"👤 Username: {username_text}\n"
+                        f"🆔 User ID: {user_id}\n"
+                        f"🎁 Reward: {reward_text}\n"
+                        f"⭐ Points: {pts}"
                     ),
                     reply_markup=keyboard
                 )
@@ -922,11 +1000,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await safe_edit(
             query,
-            "🎁 New Customer Gift\n\n"
-            "✅ Register Account\n"
-            "✅ First Deposit RM20+\n"
-            "✅ Join Channel & Group\n\n"
-            "🎁 Reward:\nRM38 Free Credit",
+            "🎁 Hadiah Member Baru\n\n"
+            "✅ Daftar akaun baru\n"
+            "✅ Deposit pertama RM20+\n"
+            "✅ Join Channel & Group dulu 😎\n\n"
+            "🎁 Reward Free:\n"
+            "RM38 Kredit Game 💸",
             keyboard
         )
 
@@ -952,9 +1031,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
 
             try:
+                username = query.from_user.username
+                username_text = f"@{username}" if username else "No Username"
+
                 await context.bot.send_message(
                     chat_id=int(admin),
-                    text=f"🎁 New Gift Request\nUser ID: {user_id}",
+                    text=(
+                        f"🎁 New Gift Request\n\n"
+                        f"👤 Username: {username_text}\n"
+                        f"🆔 User ID: {user_id}"
+                    ),
                     reply_markup=admin_keyboard
                 )
             except:
@@ -978,33 +1064,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("reject_gift:"):
 
         await safe_edit(query, "❌ Gift Rejected")
-
-    # ================= RANKING =================
-    elif query.data == "ranking":
-
-        rows = get_top_invites()
-
-        lines = ["🏆 Top Ranking\n"]
-
-        for i, row in enumerate(rows, start=1):
-
-            name, points, invites = row
-
-            lines.append(
-                f"{i}. {name}\n"
-                f"👥 {invites} invites\n"
-                f"⭐ {points} points\n"
-            )
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data="menu")]
-        ])
-
-        await safe_edit(
-            query,
-            "\n".join(lines),
-            keyboard
-        )
 
     elif query.data == "support":
 
@@ -1058,6 +1117,122 @@ async def all_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+
+
+# ================= ADMIN TEST =================
+async def admin_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if str(update.effective_user.id) not in ADMIN_IDS:
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE users
+        SET
+            last_lucky_claim='',
+            last_vip_claim='',
+            last_elite_claim=''
+        WHERE user_id=%s
+    """, (str(update.effective_user.id),))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    await update.message.reply_text(
+        "✅ Admin reward reset successful."
+    )
+
+
+
+
+async def top_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if str(update.effective_user.id) not in ADMIN_IDS:
+        return
+
+    rows = get_top_invites()
+
+    lines = ["🏆 Top Invite Ranking\n"]
+
+    for i, row in enumerate(rows, start=1):
+
+        name, points, invites = row
+
+        lines.append(
+            f"{i}. {name}\n"
+            f"⭐ {points} points\n"
+            f"👥 {invites} invites\n"
+        )
+
+    text = "\n".join(lines)
+
+    await update.message.reply_text(text)
+
+
+
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if str(update.effective_user.id) not in ADMIN_IDS:
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /broadcast your message"
+        )
+        return
+
+    message = " ".join(context.args)
+
+    users = get_all_users()
+
+    success = 0
+
+    for row in users:
+
+        user_id = row[0]
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(user_id),
+                text=message
+            )
+            success += 1
+        except:
+            pass
+
+    await update.message.reply_text(
+        f"✅ Broadcast sent to {success} users."
+    )
+
+
+
+
+async def addpoints_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if str(update.effective_user.id) not in ADMIN_IDS:
+        return
+
+    if len(context.args) < 2:
+
+        await update.message.reply_text(
+            "Usage: /addpoints USER_ID POINTS"
+        )
+        return
+
+    target_user = context.args[0]
+    points = int(context.args[1])
+
+    add_points(target_user, points)
+
+    await update.message.reply_text(
+        f"✅ Added {points} points to {target_user}"
+    )
+
+
 # ================= RUN =================
 init_db()
 
@@ -1065,6 +1240,10 @@ app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("all_users", all_users_cmd))
+app.add_handler(CommandHandler("top_users", top_users_cmd))
+app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+app.add_handler(CommandHandler("addpoints", addpoints_cmd))
+app.add_handler(CommandHandler("resetreward", admin_reset))
 app.add_handler(CallbackQueryHandler(button))
 
 print("Bot Running...")
