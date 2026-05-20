@@ -650,9 +650,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         invites = user[3]
 
-        vip_status = "✅ Unlocked" if invites >= 5 else "🔒 Unlock at 5 invites"
-        elite_status = "✅ Unlocked" if invites >= 20 else "🔒 Unlock at 20 invites"
-
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎁 Lucky Reward", callback_data="lucky_reward")],
             [InlineKeyboardButton("🔥 VIP Reward", callback_data="vip_reward")],
@@ -660,8 +657,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 Back", callback_data="back")]
         ])
 
-        await safe_edit(
-            query,
+        reward_text = (
             "⏰ Reset setiap hari 12AM\n\n"
 
             "━━━━━━━━━━━━━━\n\n"
@@ -686,8 +682,19 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔒 Unlock 20 invites\n\n"
 
             "💎 Big Rewards:\n"
-            "+1 • +5 • +15",
-            keyboard
+            "+1 • +5 • +15"
+        )
+
+        # FIX: use NEW text message instead of photo edit
+        try:
+            await query.message.delete()
+        except:
+            pass
+
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=reward_text,
+            reply_markup=keyboard
         )
 
     # ================= NORMAL REWARD =================
@@ -1010,10 +1017,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔙 Back", callback_data="menu")
         ])
 
-        await safe_edit(
-            query,
-            f"🎁 Claim Reward\n\n⭐ Your Points: {points}",
-            InlineKeyboardMarkup(keyboard_rows)
+        # FIX: use NEW text message instead of photo edit
+        try:
+            await query.message.delete()
+        except:
+            pass
+
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"🎁 Claim Reward\n\n⭐ Your Points: {points}",
+            reply_markup=InlineKeyboardMarkup(keyboard_rows)
         )
 
     elif query.data.startswith("redeem:"):
