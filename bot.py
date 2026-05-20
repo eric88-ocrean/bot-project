@@ -413,13 +413,24 @@ async def safe_edit(query, text, reply_markup=None):
 
         await asyncio.sleep(0.4)
 
-        # Telegram caption limit protection
-        if query.message.photo and len(text) < 900:
+        # Telegram photo/text edit stability fix
+        if query.message.photo:
 
-            await query.edit_message_caption(
-                caption=text,
-                reply_markup=reply_markup
-            )
+            try:
+
+                await query.edit_message_caption(
+                    caption=text[:1000],
+                    reply_markup=reply_markup
+                )
+
+            except Exception:
+
+                await query.message.delete()
+
+                await query.message.reply_text(
+                    text=text,
+                    reply_markup=reply_markup
+                )
 
         else:
 
