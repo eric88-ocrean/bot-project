@@ -10,6 +10,7 @@
 import os
 import psycopg2
 import random
+import asyncio
 from datetime import datetime
 
 from telegram import (
@@ -410,20 +411,46 @@ async def safe_edit(query, text, reply_markup=None):
 
     try:
 
+        await asyncio.sleep(0.4)
+
         if query.message.photo:
+
             await query.edit_message_caption(
                 caption=text,
                 reply_markup=reply_markup
             )
 
         else:
+
             await query.edit_message_text(
                 text=text,
                 reply_markup=reply_markup
             )
 
     except Exception as e:
-        print(e)
+
+        print(f"SAFE_EDIT_ERROR: {e}")
+
+        try:
+
+            if query.message.photo:
+
+                await query.message.reply_photo(
+                    photo=query.message.photo[-1].file_id,
+                    caption=text,
+                    reply_markup=reply_markup
+                )
+
+            else:
+
+                await query.message.reply_text(
+                    text=text,
+                    reply_markup=reply_markup
+                )
+
+        except Exception as e2:
+
+            print(f"FALLBACK_ERROR: {e2}")
 
 
 def random_reward(pool):
@@ -524,7 +551,13 @@ async def is_user_joined(chat_id, user_id, context):
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
-    await query.answer()
+
+    try:
+        await query.answer()
+    except:
+        pass
+
+    await asyncio.sleep(0.2)
 
     user_id = str(query.from_user.id)
     user = get_user(user_id)
@@ -1312,4 +1345,4 @@ app.add_handler(CommandHandler("resetreward", admin_reset))
 app.add_handler(CallbackQueryHandler(button))
 
 print("Bot Running...")
-app.run_polling()
+app.run_polling(drop_pending_updates=True)
