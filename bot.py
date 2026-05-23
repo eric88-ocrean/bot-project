@@ -1104,6 +1104,158 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+
+
+# ================= ADMIN PANEL UI =================
+
+def get_admin_panel_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 Stats", callback_data="admin_stats"),
+            InlineKeyboardButton("👥 All Users", callback_data="admin_users"),
+        ],
+        [
+            InlineKeyboardButton("🏆 Top Users", callback_data="admin_top"),
+            InlineKeyboardButton("📱 Phones", callback_data="admin_phones"),
+        ],
+        [
+            InlineKeyboardButton("🎁 Pending Redeem", callback_data="admin_redeems"),
+            InlineKeyboardButton("🎁 Pending Gift", callback_data="admin_gifts"),
+        ],
+        [
+            InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast_help"),
+            InlineKeyboardButton("💰 Add Points", callback_data="admin_addpoints_help"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Reset Reward", callback_data="admin_reset_help"),
+        ],
+    ])
+
+
+def kb_admin_back():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")]])
+
+
+def get_admin_panel_text():
+    stats = get_stats() or {}
+    redeem_count = db_fetchone("SELECT COUNT(*) AS c FROM redeem_requests WHERE status='pending'") or {}
+    gift_count = db_fetchone("SELECT COUNT(*) AS c FROM gift_requests WHERE status='pending'") or {}
+    verified_count = db_fetchone("SELECT COUNT(*) AS c FROM users WHERE phone_verified=1") or {}
+
+    return (
+        "🛠 JomJudi88 Admin Panel\n\n"
+        f"👥 Total Users: {stats.get('total_users', 0)}\n"
+        f"📱 Verified Users: {verified_count.get('c', 0)}\n"
+        f"⭐ Total Points: {stats.get('total_points', 0)}\n"
+        f"👥 Total Invites: {stats.get('total_invites', 0)}\n"
+        f"⏳ Pending Redeem: {redeem_count.get('c', 0)}\n"
+        f"⏳ Pending Gift: {gift_count.get('c', 0)}\n\n"
+        "👇 Choose an admin action below:"
+    )
+
+
+def format_admin_users(limit=30):
+    rows = get_all_users()[:int(limit)]
+    if not rows:
+        return "👥 All Users\n\nNo users found."
+
+    lines = [f"👥 All Users - Latest Top {len(rows)}\n"]
+    for i, row in enumerate(rows, start=1):
+        verified = "✅" if safe_int(row.get("phone_verified", 0)) == 1 else "❌"
+        lines.append(
+            f"{i}. {row.get('name') or 'User'}\n"
+            f"ID: {row.get('user_id')}\n"
+            f"⭐ {row.get('points', 0)} points | 👥 {row.get('invited_count', 0)} invites\n"
+            f"📱 {row.get('phone_number') or 'Not verified'} {verified}\n"
+        )
+    return "\n".join(lines)
+
+
+def format_admin_top_users():
+    rows = get_top_invites()
+    if not rows:
+        return "🏆 Top Invite Ranking\n\nNo ranking yet."
+
+    lines = ["🏆 Top Invite Ranking\n"]
+    for i, row in enumerate(rows, start=1):
+        lines.append(
+            f"{i}. {row.get('name') or 'User'}\n"
+            f"⭐ {row.get('points', 0)} points\n"
+            f"👥 {row.get('invited_count', 0)} invites\n"
+        )
+    return "\n".join(lines)
+
+
+def format_admin_phones(limit=30):
+    rows = get_verified_phones(int(limit))
+    if not rows:
+        return "📱 Verified Malaysia Numbers\n\nNo verified Malaysia numbers yet."
+
+    lines = [f"📱 Verified Malaysia Numbers - Latest {len(rows)}\n"]
+    for i, row in enumerate(rows, start=1):
+        lines.append(
+            f"{i}. {row.get('name') or 'User'}\n"
+            f"ID: {row.get('user_id')}\n"
+            f"📞 {row.get('phone_number')}\n"
+            f"✅ {row.get('phone_verified_at') or '-'}\n"
+        )
+    return "\n".join(lines)
+
+
+def get_admin_pending_redeem_markup(rows):
+    buttons = []
+    for r in rows[:10]:
+        rid = r.get("id")
+        reward = str(r.get("reward_text") or "Reward")[:20]
+        buttons.append([
+            InlineKeyboardButton(f"✅ #{rid} {reward}", callback_data=f"approve_redeem:{rid}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject_redeem:{rid}"),
+        ])
+    buttons.append([InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def get_admin_pending_gift_markup(rows):
+    buttons = []
+    for r in rows[:10]:
+        uid = r.get("user_id")
+        name = str(r.get("username") or uid)[:20]
+        buttons.append([
+            InlineKeyboardButton(f"✅ {name}", callback_data=f"approve_gift:{uid}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject_gift:{uid}"),
+        ])
+    buttons.append([InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def format_pending_redeems_for_panel(rows):
+    if not rows:
+        return "🎁 Pending Redeem\n\n✅ No pending redeem requests."
+
+    lines = ["🎁 Pending Redeem Requests\n"]
+    for r in rows[:10]:
+        lines.append(
+            f"📝 ID: {r.get('id')}\n"
+            f"👤 User: {r.get('user_id')} | {r.get('username')}\n"
+            f"🎁 Reward: {r.get('reward_text')}\n"
+            f"⭐ Points: {r.get('points_needed')}\n"
+        )
+    return "\n".join(lines)
+
+
+def format_pending_gifts_for_panel(rows):
+    if not rows:
+        return "🎁 Pending Gift\n\n✅ No pending gift requests."
+
+    lines = ["🎁 Pending Gift Requests\n"]
+    for r in rows[:10]:
+        lines.append(
+            f"📝 ID: {r.get('id')}\n"
+            f"👤 User: {r.get('user_id')} | {r.get('username')}\n"
+            f"🕒 {r.get('created_at')}\n"
+        )
+    return "\n".join(lines)
+
 # ================= START / JOIN CHECK =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1182,6 +1334,59 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 query,
                 "🇲🇾 Malaysia Users Only\n\nPlease press /start and verify your phone number first."
             )
+            return
+
+        if data.startswith("admin_"):
+            if not is_admin(user_id):
+                await safe_edit(query, "❌ Admin only.")
+                return
+
+            if data == "admin_panel":
+                await safe_edit(query, get_admin_panel_text(), get_admin_panel_keyboard())
+
+            elif data == "admin_stats":
+                await safe_edit(query, get_admin_panel_text(), kb_admin_back())
+
+            elif data == "admin_users":
+                await safe_edit(query, format_admin_users(30), kb_admin_back())
+
+            elif data == "admin_top":
+                await safe_edit(query, format_admin_top_users(), kb_admin_back())
+
+            elif data == "admin_phones":
+                await safe_edit(query, format_admin_phones(30), kb_admin_back())
+
+            elif data == "admin_redeems":
+                rows = get_pending_redeems(10)
+                await safe_edit(query, format_pending_redeems_for_panel(rows), get_admin_pending_redeem_markup(rows) if rows else kb_admin_back())
+
+            elif data == "admin_gifts":
+                rows = get_pending_gifts(10)
+                await safe_edit(query, format_pending_gifts_for_panel(rows), get_admin_pending_gift_markup(rows) if rows else kb_admin_back())
+
+            elif data == "admin_broadcast_help":
+                await safe_edit(
+                    query,
+                    "📢 Broadcast\n\nUse command:\n/broadcast your message\n\nExample:\n/broadcast 🎁 Daily Reward Reset! Claim now 🔥",
+                    kb_admin_back(),
+                )
+
+            elif data == "admin_addpoints_help":
+                await safe_edit(
+                    query,
+                    "💰 Add Points\n\nUse command:\n/addpoints USER_ID POINTS\n\nExample:\n/addpoints 123456789 10",
+                    kb_admin_back(),
+                )
+
+            elif data == "admin_reset_help":
+                await safe_edit(
+                    query,
+                    "🔄 Reset Reward Cooldown\n\nUse command:\n/resetreward USER_ID\n\nExample:\n/resetreward 123456789",
+                    kb_admin_back(),
+                )
+
+            else:
+                await safe_edit(query, "⚠️ Unknown admin action.", kb_admin_back())
             return
 
         if data == "menu":
@@ -1649,11 +1854,27 @@ async def phones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Failed to load verified numbers.")
 
 
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin only.")
+        return
+    try:
+        await update.message.reply_text(
+            get_admin_panel_text(),
+            reply_markup=get_admin_panel_keyboard(),
+        )
+    except Exception as e:
+        logger.exception("admin_cmd error: %s", e)
+        await update.message.reply_text("⚠️ Failed to open admin panel.")
+
+
 async def help_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     await update.message.reply_text(
         "🛠 Admin Commands\n\n"
+        "/admin - open button admin panel\n"
         "/stats - bot statistics\n"
         "/all_users - list all users\n"
         "/top_users - invite ranking\n"
@@ -1685,6 +1906,7 @@ def build_app():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
     app.add_handler(CommandHandler("help_admin", help_admin_cmd))
     app.add_handler(CommandHandler("all_users", all_users_cmd))
