@@ -1012,12 +1012,10 @@ async def send_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     file_id = msg.photo[-1].file_id
                     logger.info("HOME_BANNER_FILE_ID=%s", file_id)
-                    print("
-==============================")
+                    print("\n==============================")
                     print("COPY THIS FILE_ID:")
                     print(file_id)
-                    print("==============================
-")
+                    print("==============================\n")
                 except Exception:
                     pass
 
