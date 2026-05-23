@@ -29,13 +29,18 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter, Forbidden
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 
 
@@ -227,6 +232,10 @@ def init_db():
                     last_vip_claim TEXT DEFAULT '',
                     last_elite_claim TEXT DEFAULT '',
                     checkin_streak INTEGER DEFAULT 0,
+                    phone_number TEXT DEFAULT '',
+                    phone_verified INTEGER DEFAULT 0,
+                    phone_verified_at TEXT DEFAULT '',
+                    invite_rewarded INTEGER DEFAULT 0,
                     last_seen_at TEXT DEFAULT '',
                     created_at TEXT DEFAULT ''
                 )
@@ -243,6 +252,10 @@ def init_db():
                 "last_vip_claim TEXT DEFAULT ''",
                 "last_elite_claim TEXT DEFAULT ''",
                 "checkin_streak INTEGER DEFAULT 0",
+                "phone_number TEXT DEFAULT ''",
+                "phone_verified INTEGER DEFAULT 0",
+                "phone_verified_at TEXT DEFAULT ''",
+                "invite_rewarded INTEGER DEFAULT 0",
                 "last_seen_at TEXT DEFAULT ''",
                 "created_at TEXT DEFAULT ''",
             ]
@@ -294,6 +307,8 @@ def init_db():
 
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_invites ON users(invited_count DESC)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_phone_number ON users(phone_number)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_phone_verified ON users(phone_verified)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_redeem_user_status ON redeem_requests(user_id, status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_redeem_status ON redeem_requests(status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_gift_user_status ON gift_requests(user_id, status)")
@@ -322,6 +337,41 @@ def audit_log(user_id, action, detail=""):
 
 def get_user(user_id):
     return db_fetchone("SELECT * FROM users WHERE user_id=%s", (str(user_id),))
+
+
+def normalize_phone(phone: str) -> str:
+    phone = (phone or "").strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    if phone.startswith("00"):
+        phone = "+" + phone[2:]
+    elif phone.startswith("60"):
+        phone = "+" + phone
+    elif phone.startswith("0"):
+        phone = "+6" + phone
+    return phone
+
+
+def is_phone_verified(user_id) -> bool:
+    user = get_user(user_id)
+    return bool(user and safe_int(user.get("phone_verified", 0)) == 1)
+
+
+def get_verify_keyboard():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 Verify Malaysia Number", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder="Tap to verify your number",
+    )
+
+
+def get_verified_phones(limit=300):
+    return db_fetchall("""
+        SELECT user_id, name, phone_number, phone_verified_at, created_at
+        FROM users
+        WHERE phone_verified=1 AND phone_number <> ''
+        ORDER BY phone_verified_at DESC, created_at DESC
+        LIMIT %s
+    """, (int(limit),))
 
 
 def create_user(user_id, name, referrer_id=None):
@@ -375,6 +425,50 @@ def add_invite(referrer_id):
     """, (str(referrer_id),))
 
 
+def reward_referrer_if_needed(new_user_id: str):
+    """Credit referral only after Malaysia phone verification, once per user."""
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(new_user_id),))
+            user = cur.fetchone()
+            if not user:
+                conn.rollback()
+                return
+
+            referrer_id = user.get("referrer_id")
+            if not referrer_id or referrer_id == str(new_user_id):
+                conn.rollback()
+                return
+
+            if safe_int(user.get("invite_rewarded", 0)) == 1:
+                conn.rollback()
+                return
+
+            cur.execute("""
+                UPDATE users
+                SET invited_count = invited_count + 1,
+                    points = points + 1
+                WHERE user_id=%s
+            """, (str(referrer_id),))
+
+            cur.execute("UPDATE users SET invite_rewarded=1 WHERE user_id=%s", (str(new_user_id),))
+
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(referrer_id), "invite_rewarded_after_phone_verify", f"new_user={new_user_id}", now_iso()),
+            )
+
+        conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.warning("reward_referrer_if_needed failed: %s", e)
+    finally:
+        put_conn(conn)
+
+
 def get_top_invites():
     return db_fetchall("""
         SELECT name, points, invited_count
@@ -386,7 +480,7 @@ def get_top_invites():
 
 def get_all_users():
     return db_fetchall("""
-        SELECT user_id, name, points, invited_count
+        SELECT user_id, name, points, invited_count, phone_number, phone_verified
         FROM users
         ORDER BY invited_count DESC, points DESC
     """)
@@ -884,6 +978,132 @@ async def safe_edit(query, text, reply_markup=None):
             pass
 
 
+async def send_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if os.path.exists("banner.jpg"):
+            with open("banner.jpg", "rb") as photo:
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=photo,
+                    caption=get_main_text(),
+                    reply_markup=get_main_keyboard(),
+                )
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=get_main_text(),
+                reply_markup=get_main_keyboard(),
+            )
+    except Exception as e:
+        logger.warning("Banner/send_photo error, fallback send_message: %s", e)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=get_main_text(),
+            reply_markup=get_main_keyboard(),
+        )
+
+
+async def request_phone_verification(update: Update):
+    await update.effective_message.reply_text(
+        "🇲🇾 Malaysia Users Only\n\n"
+        "Please verify your phone number to continue.\n\n"
+        "Tap the button below and share your Telegram contact.",
+        reply_markup=get_verify_keyboard(),
+    )
+
+
+async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        contact = update.effective_message.contact
+        if not contact:
+            return
+
+        user = update.effective_user
+        user_id = str(user.id)
+        user_name = user.first_name or "User"
+        ensure_user(user_id, user_name)
+
+        if contact.user_id and str(contact.user_id) != user_id:
+            await update.effective_message.reply_text(
+                "❌ Please share your own Telegram phone number.",
+                reply_markup=get_verify_keyboard(),
+            )
+            return
+
+        current_user = get_user(user_id)
+        if current_user and safe_int(current_user.get("phone_verified", 0)) == 1:
+            await update.effective_message.reply_text(
+                "✅ Your number is already verified.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            await send_home(update, context)
+            return
+
+        phone = normalize_phone(contact.phone_number)
+        if not phone.startswith("+60"):
+            audit_log(user_id, "phone_verify_rejected", f"phone={phone}")
+            await update.effective_message.reply_text(
+                "❌ Malaysia phone number only 🇲🇾",
+                reply_markup=get_verify_keyboard(),
+            )
+            return
+
+        existing_phone = db_fetchone(
+            "SELECT user_id FROM users WHERE phone_number=%s AND phone_verified=1 LIMIT 1",
+            (phone,),
+        )
+        if existing_phone and str(existing_phone.get("user_id")) != user_id:
+            audit_log(user_id, "phone_duplicate_rejected", f"phone={phone}")
+            await update.effective_message.reply_text(
+                "❌ This phone number is already registered.",
+                reply_markup=get_verify_keyboard(),
+            )
+            return
+
+        db_execute(
+            """
+            UPDATE users
+            SET name=%s,
+                phone_number=%s,
+                phone_verified=1,
+                phone_verified_at=%s,
+                last_seen_at=%s
+            WHERE user_id=%s
+            """,
+            (user_name, phone, now_iso(), now_iso(), user_id),
+        )
+        audit_log(user_id, "phone_verified", f"phone={phone}")
+        reward_referrer_if_needed(user_id)
+
+        for admin in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=int(admin),
+                    text=(
+                        "✅ New Malaysia Verify\n\n"
+                        f"👤 User: {user_name}\n"
+                        f"🆔 User ID: {user_id}\n"
+                        f"📞 Phone: {phone}"
+                    ),
+                )
+            except Exception as e:
+                logger.warning("Send phone verify notice to admin %s failed: %s", admin, e)
+
+        await update.effective_message.reply_text(
+            "✅ Malaysia number verified successfully.\n\n"
+            "Welcome to JomJudi88 Rewards 🔥",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await send_home(update, context)
+
+    except Exception as e:
+        logger.exception("CONTACT_HANDLER_ERROR: %s", e)
+        try:
+            await update.effective_message.reply_text("⚠️ Verification system busy. Please try again.")
+        except Exception:
+            pass
+
+
 # ================= START / JOIN CHECK =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -904,35 +1124,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             create_user(user_id, user_name, valid_referrer)
             audit_log(user_id, "start_new_user", f"referrer={valid_referrer or ''}")
-            if valid_referrer:
-                add_invite(valid_referrer)
-                audit_log(valid_referrer, "invite_added", f"new_user={user_id}")
+            # Referral point is credited only after the new user verifies a Malaysia phone number.
         else:
             create_user(user_id, user_name, existing.get("referrer_id"))
             audit_log(user_id, "start_existing_user", "")
 
-        try:
-            if os.path.exists("banner.jpg"):
-                with open("banner.jpg", "rb") as photo:
-                    await context.bot.send_photo(
-                        chat_id=update.effective_chat.id,
-                        photo=photo,
-                        caption=get_main_text(),
-                        reply_markup=get_main_keyboard(),
-                    )
-            else:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=get_main_text(),
-                    reply_markup=get_main_keyboard(),
-                )
-        except Exception as e:
-            logger.warning("Banner/send_photo error, fallback send_message: %s", e)
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=get_main_text(),
-                reply_markup=get_main_keyboard(),
-            )
+        if not is_phone_verified(user_id):
+            await request_phone_verification(update)
+            return
+
+        await send_home(update, context)
     except Exception as e:
         logger.exception("START ERROR: %s", e)
         try:
@@ -975,6 +1176,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         user = ensure_user(user_id, user_name)
+
+        if not is_admin(user_id) and safe_int(user.get("phone_verified", 0)) != 1:
+            await safe_reply(
+                query,
+                "🇲🇾 Malaysia Users Only\n\nPlease press /start and verify your phone number first."
+            )
+            return
 
         if data == "menu":
             keyboard = InlineKeyboardMarkup([
@@ -1282,6 +1490,7 @@ async def all_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"ID: {row.get('user_id')}\n"
                 f"⭐ {row.get('points', 0)} points\n"
                 f"👥 {row.get('invited_count', 0)} invites\n"
+                f"📱 {row.get('phone_number') or 'Not verified'}\n"
             )
         text = "\n".join(lines)
         for i in range(0, len(text), 3500):
@@ -1414,6 +1623,32 @@ async def resetreward_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Reward reset successful for {target_id}.")
 
 
+async def phones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    try:
+        rows = get_verified_phones(500)
+        if not rows:
+            await update.message.reply_text("No verified Malaysia numbers yet.")
+            return
+
+        lines = [f"📱 Verified Malaysia Numbers ({len(rows)})\n"]
+        for i, row in enumerate(rows, start=1):
+            lines.append(
+                f"{i}. {row.get('name') or 'User'}\n"
+                f"ID: {row.get('user_id')}\n"
+                f"📞 {row.get('phone_number')}\n"
+                f"✅ {row.get('phone_verified_at') or '-'}\n"
+            )
+
+        text = "\n".join(lines)
+        for i in range(0, len(text), 3500):
+            await update.message.reply_text(text[i:i + 3500])
+    except Exception as e:
+        logger.exception("phones_cmd error: %s", e)
+        await update.message.reply_text("⚠️ Failed to load verified numbers.")
+
+
 async def help_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -1424,6 +1659,7 @@ async def help_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/top_users - invite ranking\n"
         "/pending_redeem - pending redeem list\n"
         "/pending_gift - pending gift list\n"
+        "/phones - verified Malaysia phone numbers\n"
         "/broadcast MESSAGE - send message to all users\n"
         "/addpoints USER_ID POINTS - add points\n"
         "/setpoints USER_ID POINTS - set exact points\n"
@@ -1449,12 +1685,14 @@ def build_app():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
     app.add_handler(CommandHandler("help_admin", help_admin_cmd))
     app.add_handler(CommandHandler("all_users", all_users_cmd))
     app.add_handler(CommandHandler("top_users", top_users_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("pending_redeem", pending_redeem_cmd))
     app.add_handler(CommandHandler("pending_gift", pending_gift_cmd))
+    app.add_handler(CommandHandler("phones", phones_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("addpoints", addpoints_cmd))
     app.add_handler(CommandHandler("setpoints", setpoints_cmd))
