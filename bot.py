@@ -1,42 +1,50 @@
-
-# FULL UPGRADED BOT V2
-# Added:
-# - Lucky Reward
-# - VIP Reward
-# - Elite Reward
-# - Daily claim protection
-# - Progression system
+# FULL UPGRADED BOT V3 - STABLE FIXED VERSION
+# Fixes:
+# - Prevent buttons from "no response" by global callback error handling
+# - Auto-create missing users on any button click
+# - Remove unnecessary sleeps that caused callback lag
+# - Safer Telegram message edit/reply fallback
+# - Safer PostgreSQL connection handling
+# - Prevent duplicate gift claim requests
+# - Prevent duplicate pending redeem requests for same user/reward
+# - Prevent redeem approval from being processed twice
+# - Prevent points from going negative
+# - Daily reward protection with Malaysia timezone
+# - Better admin permission checks
+# - Better environment/startup validation
 
 import os
-import psycopg2
 import random
-import asyncio
+import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
 )
-
+from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes
+    ContextTypes,
 )
+
+
+# ================= CONFIG =================
 
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-BOT_USERNAME = "JomJudi_bot"
+BOT_USERNAME = os.getenv("BOT_USERNAME", "JomJudi_bot")
 
+# Put admin IDs as strings.
 ADMIN_IDS = {"909399622"}
-
-
-def is_admin(user_id):
-    return str(user_id) in ADMIN_IDS
-
 
 CHANNEL_ID = "@jomjudi88cuci"
 GROUP_ID = "@jomjudi88official"
@@ -44,495 +52,576 @@ GROUP_ID = "@jomjudi88official"
 CHANNEL_URL = "https://t.me/jomjudi88cuci"
 GROUP_URL = "https://t.me/jomjudi88official"
 
+REGISTER_URL = "https://jomjudi88.live/my/register/?referral=JJ27817922"
+AMOI_MANJA_URL = "https://t.me/JomJManja_bot"
+SUPPORT_URL = "https://t.me/JomJudi88vip"
+
+TZ = ZoneInfo("Asia/Kuala_Lumpur")
+
+
+# ================= LOGGING =================
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("jomjudi88-bot")
+
+
+# ================= HELPERS =================
+
+def today_str() -> str:
+    return datetime.now(TZ).strftime("%Y-%m-%d")
+
+
+def is_admin(user_id) -> bool:
+    return str(user_id) in ADMIN_IDS
+
+
+def safe_int(value, default=0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def random_reward(pool):
+    """
+    pool example: [(0, 40), (1, 60)]
+    """
+    rewards = [item[0] for item in pool]
+    weights = [item[1] for item in pool]
+    return random.choices(rewards, weights=weights, k=1)[0]
+
 
 # ================= DB =================
+
 def get_conn():
-    return psycopg2.connect(DATABASE_URL)
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is missing.")
+    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+
+
+def db_fetchone(query, params=None):
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params or ())
+            return cur.fetchone()
+    finally:
+        if conn:
+            conn.close()
+
+
+def db_fetchall(query, params=None):
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params or ())
+            return cur.fetchall()
+    finally:
+        if conn:
+            conn.close()
+
+
+def db_execute(query, params=None):
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute(query, params or ())
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
+
+
+def db_execute_returning_id(query, params=None):
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute(query, params or ())
+            result = cur.fetchone()
+        conn.commit()
+        return result[0] if result else None
+    finally:
+        if conn:
+            conn.close()
 
 
 def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    name TEXT,
+                    points INTEGER DEFAULT 0,
+                    invited_count INTEGER DEFAULT 0,
+                    spin_chances INTEGER DEFAULT 0,
+                    gift_claimed INTEGER DEFAULT 0,
+                    referrer_id TEXT,
+                    mission_claimed INTEGER DEFAULT 0,
+                    last_lucky_claim TEXT DEFAULT '',
+                    last_vip_claim TEXT DEFAULT '',
+                    last_elite_claim TEXT DEFAULT ''
+                )
+            """)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id TEXT PRIMARY KEY,
-        name TEXT,
-        points INTEGER DEFAULT 0,
-        invited_count INTEGER DEFAULT 0,
-        spin_chances INTEGER DEFAULT 0,
-        gift_claimed INTEGER DEFAULT 0,
-        referrer_id TEXT,
-        mission_claimed INTEGER DEFAULT 0,
-        last_lucky_claim TEXT DEFAULT '',
-        last_vip_claim TEXT DEFAULT '',
-        last_elite_claim TEXT DEFAULT ''
-    )
-    """)
+            # Auto-upgrade old database safely.
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS points INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_count INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS spin_chances INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS gift_claimed INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id TEXT")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS mission_claimed INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_lucky_claim TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_vip_claim TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_elite_claim TEXT DEFAULT ''")
 
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS redeem_requests (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT,
+                    username TEXT,
+                    reward_text TEXT,
+                    points_needed INTEGER,
+                    status TEXT DEFAULT 'pending',
+                    created_at TEXT DEFAULT ''
+                )
+            """)
 
-    # ===== AUTO UPGRADE OLD DATABASE =====
-    cur.execute("""
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS last_lucky_claim TEXT DEFAULT ''
-    """)
+            cur.execute("ALTER TABLE redeem_requests ADD COLUMN IF NOT EXISTS created_at TEXT DEFAULT ''")
 
-    cur.execute("""
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS last_vip_claim TEXT DEFAULT ''
-    """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_redeem_user_status
+                ON redeem_requests(user_id, status)
+            """)
 
-    cur.execute("""
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS last_elite_claim TEXT DEFAULT ''
-    """)
-
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS redeem_requests (
-        id SERIAL PRIMARY KEY,
-        user_id TEXT,
-        username TEXT,
-        reward_text TEXT,
-        points_needed INTEGER,
-        status TEXT DEFAULT 'pending'
-    )
-    """)
-
-    conn.commit()
-    cur.close()
-    conn.close()
+        conn.commit()
+        logger.info("Database initialized.")
+    finally:
+        if conn:
+            conn.close()
 
 
 def get_user(user_id):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
-    row = cur.fetchone()
-
-    cur.close()
-    conn.close()
-
-    return row
+    return db_fetchone("SELECT * FROM users WHERE user_id=%s", (str(user_id),))
 
 
 def create_user(user_id, name, referrer_id=None):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
+    db_execute("""
         INSERT INTO users
         (
-            user_id,name,points,invited_count,
-            spin_chances,gift_claimed,
-            referrer_id,mission_claimed,
-            last_lucky_claim,last_vip_claim,last_elite_claim
+            user_id, name, points, invited_count,
+            spin_chances, gift_claimed, referrer_id, mission_claimed,
+            last_lucky_claim, last_vip_claim, last_elite_claim
         )
         VALUES (%s,%s,0,0,0,0,%s,0,'','','')
-        ON CONFLICT (user_id) DO NOTHING
-    """, (user_id, name, referrer_id))
+        ON CONFLICT (user_id) DO UPDATE SET
+            name = EXCLUDED.name
+    """, (str(user_id), name or "User", referrer_id))
 
-    conn.commit()
-    cur.close()
-    conn.close()
+
+def ensure_user(user_id, name="User"):
+    user = get_user(user_id)
+    if user:
+        return user
+
+    create_user(str(user_id), name or "User")
+    user = get_user(user_id)
+
+    if not user:
+        raise RuntimeError(f"Could not create/fetch user {user_id}")
+
+    return user
 
 
 def add_points(user_id, amount):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
+    amount = safe_int(amount)
+    db_execute("""
         UPDATE users
-        SET points = points + %s
+        SET points = GREATEST(points + %s, 0)
         WHERE user_id=%s
-    """, (amount, user_id))
-
-    conn.commit()
-    cur.close()
-    conn.close()
+    """, (amount, str(user_id)))
 
 
-def deduct_points(user_id, amount):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE users
-        SET points = points - %s
-        WHERE user_id=%s
-    """, (amount, user_id))
-
-    conn.commit()
-    cur.close()
-    conn.close()
+def deduct_points(user_id, amount) -> bool:
+    amount = safe_int(amount)
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE users
+                SET points = points - %s
+                WHERE user_id=%s AND points >= %s
+                RETURNING user_id
+            """, (amount, str(user_id), amount))
+            row = cur.fetchone()
+        conn.commit()
+        return row is not None
+    finally:
+        if conn:
+            conn.close()
 
 
 def add_invite(referrer_id):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
+    db_execute("""
         UPDATE users
         SET invited_count = invited_count + 1,
             points = points + 1
         WHERE user_id=%s
-    """, (referrer_id,))
-
-    conn.commit()
-    cur.close()
-    conn.close()
+    """, (str(referrer_id),))
 
 
 def update_claim(user_id, claim_type):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = today_str()
 
-    conn = get_conn()
-    cur = conn.cursor()
+    column_map = {
+        "lucky": "last_lucky_claim",
+        "vip": "last_vip_claim",
+        "elite": "last_elite_claim",
+    }
 
-    if claim_type == "lucky":
-        cur.execute("""
-            UPDATE users
-            SET last_lucky_claim=%s
-            WHERE user_id=%s
-        """, (today, user_id))
+    column = column_map.get(claim_type)
+    if not column:
+        raise ValueError("Invalid claim type.")
 
-    elif claim_type == "vip":
-        cur.execute("""
-            UPDATE users
-            SET last_vip_claim=%s
-            WHERE user_id=%s
-        """, (today, user_id))
+    db_execute(
+        f"UPDATE users SET {column}=%s WHERE user_id=%s",
+        (today, str(user_id))
+    )
 
-    elif claim_type == "elite":
-        cur.execute("""
-            UPDATE users
-            SET last_elite_claim=%s
-            WHERE user_id=%s
-        """, (today, user_id))
 
-    conn.commit()
-    cur.close()
-    conn.close()
+def has_claimed_any_reward_today(user):
+    today = today_str()
+    return (
+        user.get("last_lucky_claim") == today or
+        user.get("last_vip_claim") == today or
+        user.get("last_elite_claim") == today
+    )
+
+
+def mark_gift_claimed(user_id):
+    db_execute("UPDATE users SET gift_claimed=1 WHERE user_id=%s", (str(user_id),))
+
+
+def mark_mission_claimed(user_id):
+    db_execute("UPDATE users SET mission_claimed=1 WHERE user_id=%s", (str(user_id),))
 
 
 def create_redeem_request(user_id, username, reward_text, points_needed):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
+    return db_execute_returning_id("""
         INSERT INTO redeem_requests
-        (user_id, username, reward_text, points_needed, status)
-        VALUES (%s,%s,%s,%s,'pending')
+        (user_id, username, reward_text, points_needed, status, created_at)
+        VALUES (%s,%s,%s,%s,'pending',%s)
         RETURNING id
-    """, (user_id, username, reward_text, points_needed))
-
-    request_id = cur.fetchone()[0]
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    return request_id
+    """, (str(user_id), username, reward_text, int(points_needed), datetime.now(TZ).isoformat()))
 
 
 def get_redeem_request(request_id):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
+    return db_fetchone("""
         SELECT *
         FROM redeem_requests
         WHERE id=%s
-    """, (request_id,))
+    """, (int(request_id),))
 
-    row = cur.fetchone()
 
-    cur.close()
-    conn.close()
-
+def has_pending_redeem(user_id, reward_text=None):
+    if reward_text:
+        row = db_fetchone("""
+            SELECT id FROM redeem_requests
+            WHERE user_id=%s AND reward_text=%s AND status='pending'
+            LIMIT 1
+        """, (str(user_id), reward_text))
+    else:
+        row = db_fetchone("""
+            SELECT id FROM redeem_requests
+            WHERE user_id=%s AND status='pending'
+            LIMIT 1
+        """, (str(user_id),))
     return row
 
 
 def update_redeem_status(request_id, status):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
+    db_execute("""
         UPDATE redeem_requests
         SET status=%s
         WHERE id=%s
-    """, (status, request_id))
-
-    conn.commit()
-    cur.close()
-    conn.close()
+    """, (status, int(request_id)))
 
 
-def mark_gift_claimed(user_id):
-    conn = get_conn()
-    cur = conn.cursor()
+def approve_redeem_request(request_id) -> tuple[bool, str]:
+    """
+    Returns: (success, message)
+    """
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT *
+                FROM redeem_requests
+                WHERE id=%s
+                FOR UPDATE
+            """, (int(request_id),))
+            req = cur.fetchone()
 
-    cur.execute("""
-        UPDATE users
-        SET gift_claimed=1
-        WHERE user_id=%s
-    """, (user_id,))
+            if not req:
+                conn.rollback()
+                return False, "❌ Redeem request not found."
 
-    conn.commit()
-    cur.close()
-    conn.close()
+            if req["status"] != "pending":
+                conn.rollback()
+                return False, f"⚠️ This request was already {req['status']}."
+
+            cur.execute("""
+                UPDATE users
+                SET points = points - %s
+                WHERE user_id=%s AND points >= %s
+                RETURNING points
+            """, (req["points_needed"], req["user_id"], req["points_needed"]))
+            updated_user = cur.fetchone()
+
+            if not updated_user:
+                conn.rollback()
+                return False, "❌ User does not have enough points now. Approval cancelled."
+
+            cur.execute("""
+                UPDATE redeem_requests
+                SET status='approved'
+                WHERE id=%s
+            """, (int(request_id),))
+
+        conn.commit()
+        return True, "✅ Redeem Approved."
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("approve_redeem_request error: %s", e)
+        return False, "⚠️ Approval failed. Please check logs."
+    finally:
+        if conn:
+            conn.close()
 
 
-def mark_mission_claimed(user_id):
-    conn = get_conn()
-    cur = conn.cursor()
+def reject_redeem_request(request_id) -> tuple[bool, str]:
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT *
+                FROM redeem_requests
+                WHERE id=%s
+                FOR UPDATE
+            """, (int(request_id),))
+            req = cur.fetchone()
 
-    cur.execute("""
-        UPDATE users
-        SET mission_claimed=1
-        WHERE user_id=%s
-    """, (user_id,))
+            if not req:
+                conn.rollback()
+                return False, "❌ Redeem request not found."
 
-    conn.commit()
-    cur.close()
-    conn.close()
+            if req["status"] != "pending":
+                conn.rollback()
+                return False, f"⚠️ This request was already {req['status']}."
+
+            cur.execute("""
+                UPDATE redeem_requests
+                SET status='rejected'
+                WHERE id=%s
+            """, (int(request_id),))
+
+        conn.commit()
+        return True, "❌ Redeem Rejected."
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("reject_redeem_request error: %s", e)
+        return False, "⚠️ Reject failed. Please check logs."
+    finally:
+        if conn:
+            conn.close()
 
 
 def get_top_invites():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
+    return db_fetchall("""
         SELECT name, points, invited_count
         FROM users
         ORDER BY invited_count DESC, points DESC
         LIMIT 10
     """)
 
-    rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return rows
-
 
 def get_all_users():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT user_id,name,points,invited_count
+    return db_fetchall("""
+        SELECT user_id, name, points, invited_count
         FROM users
-        ORDER BY invited_count DESC
+        ORDER BY invited_count DESC, points DESC
     """)
-
-    rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return rows
 
 
 # ================= UI =================
+
 def get_main_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(
-                "🔐 Daftar Akaun",
-                url="https://jomjudi88.live/my/register/?referral=JJ27817922"
-            ),
-            InlineKeyboardButton(
-                "💰 Earn Rewards",
-                callback_data="menu"
-            )
+            InlineKeyboardButton("🔐 Daftar Akaun", url=REGISTER_URL),
+            InlineKeyboardButton("💰 Earn Rewards", callback_data="menu"),
         ],
         [
-            InlineKeyboardButton(
-                "🎁 New Join Free RM38",
-                callback_data="gift"
-            ),
-            InlineKeyboardButton(
-                "🎁 Daily Check In",
-                callback_data="reward_center"
-            )
+            InlineKeyboardButton("🎁 New Join Free RM38", callback_data="gift"),
+            InlineKeyboardButton("🎁 Daily Check In", callback_data="reward_center"),
         ],
         [
-            InlineKeyboardButton(
-                "📢 Join Channel",
-                url=CHANNEL_URL
-            ),
-            InlineKeyboardButton(
-                "👥 Join Group",
-                url=GROUP_URL
-            )
+            InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL),
+            InlineKeyboardButton("👥 Join Group", url=GROUP_URL),
         ],
         [
-            InlineKeyboardButton(
-                "🔞 Amoi Manja",
-                url="https://t.me/JomJManja_bot"
-            ),
-            InlineKeyboardButton(
-                "🎧 Support",
-                callback_data="support"
-            )
-        ]
+            InlineKeyboardButton("🔞 Amoi Manja", url=AMOI_MANJA_URL),
+            InlineKeyboardButton("🎧 Support", callback_data="support"),
+        ],
     ])
 
 
 def get_main_text():
     return (
         "🎁 Welcome to JomJudi88 Bot Rewards 🔥\n\n"
-
         "🚀 Sistem Reward & Bonus untuk player Malaysia 🇲🇾\n\n"
-
         "💸 Main sambil collect reward setiap hari!\n\n"
-
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
         "✅ Invite & unlock VIP rewards\n"
         "✅ Claim points & redeem hadiah\n"
         "✅ Touch 'n Go RM100\n"
         "✅ Reward update setiap hari\n\n"
-
         "━━━━━━━━━━━━━━\n\n"
-
         "🧠 Sistem Auto Layan Diri\n"
         "✔️ Deposit & withdraw auto\n"
         "✔️ Support 24/7\n"
         "✔️ Privasi terjamin 🔐\n\n"
-
         "👇 Pilih menu di bawah untuk mula"
     )
 
-async def safe_edit(query, text, reply_markup=None):
 
+def back_to_menu_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="menu")]])
+
+
+def back_to_home_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]])
+
+
+async def safe_reply(query, text, reply_markup=None):
     try:
+        await query.message.reply_text(text=text, reply_markup=reply_markup)
+    except Exception as e:
+        logger.exception("safe_reply error: %s", e)
 
-        await asyncio.sleep(0.4)
 
-        # Telegram photo/text edit stability fix
-        if query.message.photo:
+async def safe_edit(query, text, reply_markup=None):
+    """
+    Never lets a callback silently die.
+    If editing fails, replies with a new message.
+    """
+    try:
+        msg = query.message
 
+        if msg and msg.photo:
             try:
-
                 await query.edit_message_caption(
-                    caption=text[:1000],
+                    caption=text[:1024],
                     reply_markup=reply_markup
                 )
+                return
+            except BadRequest as e:
+                # If old message is photo but new text is long, reply as text instead.
+                logger.warning("edit caption failed, fallback reply_text: %s", e)
 
-            except Exception:
-
-                await query.message.delete()
-
-                await query.message.reply_text(
-                    text=text,
-                    reply_markup=reply_markup
-                )
-
-        else:
-
+        try:
             await query.edit_message_text(
                 text=text,
                 reply_markup=reply_markup
             )
+            return
+        except BadRequest as e:
+            message = str(e).lower()
+            if "message is not modified" in message:
+                return
+            logger.warning("edit text failed, fallback reply_text: %s", e)
 
-    except Exception as e:
+        await safe_reply(query, text, reply_markup=reply_markup)
 
-        print(f"SAFE_EDIT_ERROR: {e}")
-
+    except RetryAfter as e:
+        logger.warning("Telegram rate limit: retry after %s", e.retry_after)
+        await safe_reply(query, "⚠️ Too many requests. Please try again in a few seconds.", reply_markup)
+    except (TimedOut, NetworkError) as e:
+        logger.warning("Telegram network error: %s", e)
         try:
-
-            if query.message.photo:
-
-                await query.message.reply_photo(
-                    photo=query.message.photo[-1].file_id,
-                    caption=text,
-                    reply_markup=reply_markup
-                )
-
-            else:
-
-                await query.message.reply_text(
-                    text=text,
-                    reply_markup=reply_markup
-                )
-
-        except Exception as e2:
-
-            print(f"FALLBACK_ERROR: {e2}")
-
-
-def random_reward(pool):
-    rewards = []
-
-    for reward, weight in pool:
-        rewards.extend([reward] * weight)
-
-    return random.choice(rewards)
+            await safe_reply(query, "⚠️ Network busy. Please press again.", reply_markup)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.exception("SAFE_EDIT_ERROR: %s", e)
+        try:
+            await safe_reply(query, text, reply_markup=reply_markup)
+        except Exception:
+            pass
 
 
 # ================= START =================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
-
         user = update.effective_user
-
         user_id = str(user.id)
         user_name = user.first_name or "User"
 
         referrer_id = None
-
         if context.args:
-            try:
-                referrer_id = str(context.args[0])
-            except:
-                referrer_id = None
+            referrer_id = str(context.args[0]).strip()
 
         existing = get_user(user_id)
 
         if not existing:
-
             valid_referrer = None
 
             if referrer_id and referrer_id != user_id:
+                ref_user = get_user(referrer_id)
+                if ref_user:
+                    valid_referrer = referrer_id
 
-                try:
-                    ref_user = get_user(referrer_id)
+            create_user(user_id, user_name, valid_referrer)
 
-                    if ref_user:
-                        valid_referrer = referrer_id
-
-                except Exception as e:
-                    print(f"Referrer Error: {e}")
-
-            try:
-                create_user(user_id, user_name, valid_referrer)
-
-                if valid_referrer:
-                    add_invite(valid_referrer)
-
-            except Exception as e:
-                print(f"Create User Error: {e}")
+            # Only first-time user can add invite.
+            if valid_referrer:
+                add_invite(valid_referrer)
+        else:
+            # Keep display name updated.
+            create_user(user_id, user_name, existing.get("referrer_id"))
 
         try:
-
-            with open("banner.jpg", "rb") as photo:
-
-                await context.bot.send_photo(
+            if os.path.exists("banner.jpg"):
+                with open("banner.jpg", "rb") as photo:
+                    await context.bot.send_photo(
+                        chat_id=update.effective_chat.id,
+                        photo=photo,
+                        caption=get_main_text(),
+                        reply_markup=get_main_keyboard()
+                    )
+            else:
+                await context.bot.send_message(
                     chat_id=update.effective_chat.id,
-                    photo=photo,
-                    caption=get_main_text(),
+                    text=get_main_text(),
                     reply_markup=get_main_keyboard()
                 )
-
         except Exception as e:
-
-            print(f"Banner Error: {e}")
-
+            logger.warning("Banner/send_photo error, fallback send_message: %s", e)
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=get_main_text(),
@@ -540,826 +629,732 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     except Exception as e:
-
-        print(f"START ERROR: {e}")
-
+        logger.exception("START ERROR: %s", e)
         try:
-            await update.message.reply_text(
-                "Bot temporarily busy. Please press /start again."
+            await update.effective_message.reply_text(
+                "⚠️ Bot temporarily busy. Please press /start again."
             )
-        except:
+        except Exception:
             pass
 
 
-async def is_user_joined(chat_id, user_id, context):
+async def is_user_joined(chat_id, user_id, context) -> bool:
     try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
+        member = await context.bot.get_chat_member(chat_id, int(user_id))
         return member.status in ["member", "administrator", "creator"]
-    except:
+    except Exception as e:
+        logger.warning("Join check failed for chat %s user %s: %s", chat_id, user_id, e)
         return False
 
 
-# ================= BUTTON =================
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= CALLBACK BUTTONS =================
 
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
     try:
-        await query.answer(cache_time=0)
-    except Exception as e:
-        print(f"ANSWER ERROR: {e}")
+        try:
+            await query.answer(cache_time=0)
+        except Exception as e:
+            logger.warning("Callback answer error: %s", e)
 
-    await asyncio.sleep(0.2)
+        user_id = str(query.from_user.id)
+        user_name = query.from_user.first_name or "User"
+        data = query.data or ""
 
-    user_id = str(query.from_user.id)
-    user = get_user(user_id)
+        # Important fix: user may press old inline button before /start finishes or DB row exists.
+        user = ensure_user(user_id, user_name)
 
-    # ================= MENU =================
-    if query.data == "menu":
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💎 Your Rewards", callback_data="profile")],
-            [InlineKeyboardButton("💰 Share & Earn", callback_data="link")],
-            [InlineKeyboardButton("🎯 Missions", callback_data="missions")],
-            [InlineKeyboardButton("🎁 Claim Reward", callback_data="redeem_menu")],
-                        [InlineKeyboardButton("🔙 Back", callback_data="back")]
-        ])
-
-        await safe_edit(
-            query,
-            "💰 Rewards Center\n\n"
-
-            "🎁 Complete missions\n"
-            "🔥 Unlock VIP rewards\n"
-            "💸 Collect points & claim hadiah setiap hari\n\n"
-
-            "💰 Claim Touch'N Go FREE RM100\n\n"
-
-            "Syarat untuk claim reward:\n\n"
-
-            "• Mesti ada akaun berdaftar di JomJudi88\n"
-            "• Share referral link ke Facebook / Telegram / kawan-kawan\n"
-            "  (1 referral = 1 point)\n\n"
-
-            "🎁 Ganjaran:\n\n"
-
-            "• 3 Point = RM1 Kredit Game\n"
-            "• 10 Point = RM5 Kredit Game\n"
-            "• 20 Point = RM10 Kredit Game\n"
-            "• 50 Point = RM25 Kredit Game\n"
-            "• 100 Point = RM50 Kredit Game\n"
-            "• 200 Point = Touch 'n Go RM100\n\n"
-
-            "👇 Select an option below:",
-            keyboard
-        )
-
-    elif query.data == "profile":
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Back", callback_data="menu")]
-        ])
-
-        await safe_edit(
-            query,
-            f"💎 Your Rewards\n\n"
-            f"⭐️ Reward Points: {user[2]}\n"
-            f"👥 Friends Referred: {user[3]}\n\n"
-            f"----------------------------------------",
-            keyboard
-        )
-
-    elif query.data == "link":
-
-        link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data="menu")]
-        ])
-
-        await safe_edit(
-            query,
-            f"💰 Share & Earn Lagi!\n\n"
-            f"Jom ajak kawan join & collect reward sama-sama 🔥\n\n"
-            f"🔗 Link Boss:\n\n{link}",
-            keyboard
-        )
-
-    # ================= REWARD CENTER =================
-    elif query.data == "reward_center":
-
-        invites = user[3]
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎁 Lucky Reward", callback_data="lucky_reward")],
-            [InlineKeyboardButton("🔥 VIP Reward", callback_data="vip_reward")],
-            [InlineKeyboardButton("👑 Elite Reward", callback_data="elite_reward")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back")]
-        ])
-
-        reward_text = (
-            "⏰ Reset setiap hari 12AM\n\n"
-
-            "━━━━━━━━━━━━━━\n\n"
-
-            "🎁 Lucky Reward\n"
-            "🔓 Semua boleh claim\n\n"
-
-            "⭐️ Random Points:\n"
-            "+1 • +2 •\n\n"
-
-            "━━━━━━━━━━━━━━\n\n"
-
-            "🔥 VIP Reward\n"
-            "🔒 Unlock 5 invites\n\n"
-
-            "⭐️ Better Rewards:\n"
-            "+1 • +3 • +10\n\n"
-
-            "━━━━━━━━━━━━━━\n\n"
-
-            "👑 Elite Reward\n"
-            "🔒 Unlock 20 invites\n\n"
-
-            "💎 Big Rewards:\n"
-            "+1 • +5 • +15"
-        )
-
-        # STABLE PANEL UI
-        await query.message.reply_text(
-            text=reward_text,
-            reply_markup=keyboard
-        )
-
-        return
-
-    # ================= NORMAL REWARD =================
-    elif query.data == "lucky_reward":
-
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        if (
-            not is_admin(user_id) and (
-                user[8] == today or
-                user[9] == today or
-                user[10] == today
-            )
-        ):
-
+        # ================= MENU =================
+        if data == "menu":
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
+                [InlineKeyboardButton("💎 Your Rewards", callback_data="profile")],
+                [InlineKeyboardButton("💰 Share & Earn", callback_data="link")],
+                [InlineKeyboardButton("🎯 Missions", callback_data="missions")],
+                [InlineKeyboardButton("🎁 Claim Reward", callback_data="redeem_menu")],
+                [InlineKeyboardButton("🔙 Back", callback_data="back")],
             ])
 
             await safe_edit(
                 query,
-                "❌ You already claimed today's Lucky Reward.",
+                "💰 Rewards Center\n\n"
+                "🎁 Complete missions\n"
+                "🔥 Unlock VIP rewards\n"
+                "💸 Collect points & claim hadiah setiap hari\n\n"
+                "💰 Claim Touch'N Go FREE RM100\n\n"
+                "Syarat untuk claim reward:\n\n"
+                "• Mesti ada akaun berdaftar di JomJudi88\n"
+                "• Share referral link ke Facebook / Telegram / kawan-kawan\n"
+                "  (1 referral = 1 point)\n\n"
+                "🎁 Ganjaran:\n\n"
+                "• 3 Point = RM1 Kredit Game\n"
+                "• 10 Point = RM5 Kredit Game\n"
+                "• 20 Point = RM10 Kredit Game\n"
+                "• 50 Point = RM25 Kredit Game\n"
+                "• 100 Point = RM50 Kredit Game\n"
+                "• 200 Point = Touch 'n Go RM100\n\n"
+                "👇 Select an option below:",
                 keyboard
             )
-            return
 
-        reward = random_reward([
-            (0, 40),
-            (1, 60)
-        ])
-
-        update_claim(user_id, "lucky")
-        user = get_user(user_id)
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
-        ])
-
-        if reward > 0:
-            add_points(user_id, reward)
+        elif data == "profile":
+            user = get_user(user_id) or user
+            keyboard = back_to_menu_keyboard()
 
             await safe_edit(
                 query,
-                f"🎉 Reward Berjaya Dibuka!\n\n"
-                f"⭐ +{reward} Points masuk 🔥",
+                f"💎 Your Rewards\n\n"
+                f"⭐️ Reward Points: {user.get('points', 0)}\n"
+                f"👥 Friends Referred: {user.get('invited_count', 0)}\n\n"
+                f"----------------------------------------",
                 keyboard
             )
-        else:
+
+        elif data == "link":
+            link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+            keyboard = back_to_menu_keyboard()
+
             await safe_edit(
                 query,
-                "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥",
+                f"💰 Share & Earn Lagi!\n\n"
+                f"Jom ajak kawan join & collect reward sama-sama 🔥\n\n"
+                f"🔗 Link Boss:\n\n{link}",
                 keyboard
             )
 
-    # ================= VIP REWARD =================
-    elif query.data == "vip_reward":
-
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        if (
-            not is_admin(user_id) and (
-                user[8] == today or
-                user[9] == today or
-                user[10] == today
-            )
-        ):
-
+        # ================= REWARD CENTER =================
+        elif data == "reward_center":
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
+                [InlineKeyboardButton("🎁 Lucky Reward", callback_data="lucky_reward")],
+                [InlineKeyboardButton("🔥 VIP Reward", callback_data="vip_reward")],
+                [InlineKeyboardButton("👑 Elite Reward", callback_data="elite_reward")],
+                [InlineKeyboardButton("🔙 Back", callback_data="back")],
+            ])
+
+            reward_text = (
+                "⏰ Reset setiap hari 12AM Malaysia time\n\n"
+                "━━━━━━━━━━━━━━\n\n"
+                "🎁 Lucky Reward\n"
+                "🔓 Semua boleh claim\n\n"
+                "⭐️ Random Points:\n"
+                "+0 • +1\n\n"
+                "━━━━━━━━━━━━━━\n\n"
+                "🔥 VIP Reward\n"
+                "🔒 Unlock 5 invites\n\n"
+                "⭐️ Better Rewards:\n"
+                "+0 • +1 • +3\n\n"
+                "━━━━━━━━━━━━━━\n\n"
+                "👑 Elite Reward\n"
+                "🔒 Unlock 20 invites\n\n"
+                "💎 Big Rewards:\n"
+                "+0 • +1 • +5"
+            )
+
+            await safe_edit(query, reward_text, keyboard)
+
+        # ================= DAILY REWARDS =================
+        elif data == "lucky_reward":
+            user = get_user(user_id) or user
+
+            if not is_admin(user_id) and has_claimed_any_reward_today(user):
+                await safe_edit(
+                    query,
+                    "❌ You already claimed today's reward.\n\n⏰ Please come back after 12AM Malaysia time.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="reward_center")]])
+                )
+                return
+
+            reward = random_reward([(0, 40), (1, 60)])
+
+            update_claim(user_id, "lucky")
+            if reward > 0:
+                add_points(user_id, reward)
+
+            await safe_edit(
+                query,
+                (
+                    f"🎉 Reward Berjaya Dibuka!\n\n⭐ +{reward} Points masuk 🔥"
+                    if reward > 0 else
+                    "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥"
+                ),
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="reward_center")]])
+            )
+
+        elif data == "vip_reward":
+            user = get_user(user_id) or user
+
+            if not is_admin(user_id) and has_claimed_any_reward_today(user):
+                await safe_edit(
+                    query,
+                    "❌ You already claimed today's reward.\n\n⏰ Please come back after 12AM Malaysia time.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="reward_center")]])
+                )
+                return
+
+            invites = safe_int(user.get("invited_count", 0))
+
+            if invites < 5 and not is_admin(user_id):
+                await safe_edit(
+                    query,
+                    "🔒 VIP Reward unlocks at 5 invites.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="reward_center")]])
+                )
+                return
+
+            reward = random_reward([(0, 30), (1, 65), (3, 5)])
+
+            update_claim(user_id, "vip")
+            if reward > 0:
+                add_points(user_id, reward)
+
+            await safe_edit(
+                query,
+                (
+                    f"🎉 Reward Berjaya Dibuka!\n\n⭐ +{reward} Points masuk 🔥"
+                    if reward > 0 else
+                    "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥"
+                ),
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="reward_center")]])
+            )
+
+        elif data == "elite_reward":
+            user = get_user(user_id) or user
+
+            if not is_admin(user_id) and has_claimed_any_reward_today(user):
+                await safe_edit(
+                    query,
+                    "❌ You already claimed today's reward.\n\n⏰ Please come back after 12AM Malaysia time.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="reward_center")]])
+                )
+                return
+
+            invites = safe_int(user.get("invited_count", 0))
+
+            if invites < 20 and not is_admin(user_id):
+                await safe_edit(
+                    query,
+                    "🔒 Elite Reward unlocks at 20 invites.",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="reward_center")]])
+                )
+                return
+
+            reward = random_reward([(0, 30), (1, 67), (5, 3)])
+
+            update_claim(user_id, "elite")
+            if reward > 0:
+                add_points(user_id, reward)
+
+            await safe_edit(
+                query,
+                (
+                    f"🎉 Reward Berjaya Dibuka!\n\n⭐ +{reward} Points masuk 🔥"
+                    if reward > 0 else
+                    "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥"
+                ),
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="reward_center")]])
+            )
+
+        # ================= MISSIONS =================
+        elif data == "missions":
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)],
+                [InlineKeyboardButton("👥 Join Group", url=GROUP_URL)],
+                [InlineKeyboardButton("✅ Done Join", callback_data="check_missions")],
+                [InlineKeyboardButton("🔙 Back", callback_data="menu")],
             ])
 
             await safe_edit(
                 query,
-                "❌ You already claimed today's reward.",
-                keyboard
-            )
-            return
-
-        invites = user[3]
-
-        if invites < 5:
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
-            ])
-
-            await safe_edit(
-                query,
-                "🔒 VIP Reward unlocks at 5 invites.",
-                keyboard
-            )
-            return
-
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        if user[9] == today:
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
-            ])
-
-            await safe_edit(
-                query,
-                "❌ You already claimed today's VIP Reward.",
-                keyboard
-            )
-            return
-
-        reward = random_reward([
-            (0, 30),
-            (1, 65),
-            (3, 5)
-        ])
-
-        update_claim(user_id, "vip")
-        user = get_user(user_id)
-        add_points(user_id, reward)
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
-        ])
-
-        if reward > 0:
-
-            await safe_edit(
-                query,
-                f"🎉 Reward Berjaya Dibuka!\n\n"
-                f"⭐ +{reward} Points masuk 🔥",
+                "🎯 Missions\n\n"
+                "Jom complete mission & collect reward 🔥\n\n"
+                "✅ Join Channel\n"
+                "✅ Join Group\n"
+                "🎁 Claim +2 Points",
                 keyboard
             )
 
-        else:
+        elif data == "check_missions":
+            user = get_user(user_id) or user
 
-            await safe_edit(
-                query,
-                "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥",
-                keyboard
-            )
+            if safe_int(user.get("mission_claimed", 0)) == 1 and not is_admin(user_id):
+                await safe_edit(
+                    query,
+                    "✅ You already claimed mission rewards.",
+                    back_to_menu_keyboard()
+                )
+                return
 
-    # ================= ELITE REWARD =================
-    elif query.data == "elite_reward":
+            joined_channel = await is_user_joined(CHANNEL_ID, user_id, context)
+            joined_group = await is_user_joined(GROUP_ID, user_id, context)
 
-        today = datetime.now().strftime("%Y-%m-%d")
+            if joined_channel and joined_group:
+                add_points(user_id, 2)
+                mark_mission_claimed(user_id)
 
-        if (
-            not is_admin(user_id) and (
-                user[8] == today or
-                user[9] == today or
-                user[10] == today
-            )
-        ):
+                await safe_edit(
+                    query,
+                    "🎉 Mission Completed!\n\n⭐ +2 Points Added",
+                    back_to_menu_keyboard()
+                )
+            else:
+                await safe_edit(
+                    query,
+                    "❌ Please join Channel & Group first.\n\n"
+                    "⚠️ If you already joined but still cannot claim, make sure the bot is admin in the channel/group.",
+                    back_to_menu_keyboard()
+                )
 
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
-            ])
+        # ================= REDEEM =================
+        elif data == "redeem_menu":
+            user = get_user(user_id) or user
+            points = safe_int(user.get("points", 0))
 
-            await safe_edit(
-                query,
-                "❌ You already claimed today's reward.",
-                keyboard
-            )
-            return
+            keyboard_rows = []
+            rewards = [
+                ("RM1 Credit", 3),
+                ("RM5 Credit", 10),
+                ("RM10 Credit", 20),
+                ("RM25 Credit", 50),
+                ("RM50 Credit", 100),
+                ("Touch 'n Go RM100", 200),
+            ]
 
-        invites = user[3]
+            for reward_text, pts in rewards:
+                if points >= pts:
+                    keyboard_rows.append([
+                        InlineKeyboardButton(
+                            f"{reward_text} ({pts} Points)",
+                            callback_data=f"redeem:{pts}:{reward_text}"
+                        )
+                    ])
 
-        if invites < 20:
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
-            ])
-
-            await safe_edit(
-                query,
-                "🔒 Elite Reward unlocks at 20 invites.",
-                keyboard
-            )
-            return
-
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        if user[10] == today:
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
-            ])
-
-            await safe_edit(
-                query,
-                "❌ You already claimed today's Elite Reward.",
-                keyboard
-            )
-            return
-
-        reward = random_reward([
-            (0, 30),
-            (1, 67),
-            (5, 3)
-        ])
-
-        update_claim(user_id, "elite")
-        user = get_user(user_id)
-        add_points(user_id, reward)
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data="reward_center")]
-        ])
-
-        if reward > 0:
-
-            await safe_edit(
-                query,
-                f"🎉 Reward Berjaya Dibuka!\n\n"
-                f"⭐ +{reward} Points masuk 🔥",
-                keyboard
-            )
-
-        else:
-
-            await safe_edit(
-                query,
-                "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥",
-                keyboard
-            )
-
-    # ================= MISSIONS =================
-    elif query.data == "missions":
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)],
-            [InlineKeyboardButton("👥 Join Group", url=GROUP_URL)],
-            [InlineKeyboardButton("✅ Done Join", callback_data="check_missions")],
-            [InlineKeyboardButton("🔙 Back", callback_data="menu")]
-        ])
-
-        await safe_edit(
-            query,
-            "🎯 Missions\n\n"
-            "Jom complete mission & collect reward 🔥",
-            keyboard
-        )
-
-    elif query.data == "check_missions":
-
-        if user[7] == 1:
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="menu")]
-            ])
-
-            await safe_edit(
-                query,
-                "✅ You already claimed mission rewards.",
-                keyboard
-            )
-            return
-
-        joined_channel = await is_user_joined(
-            CHANNEL_ID,
-            int(user_id),
-            context
-        )
-
-        joined_group = await is_user_joined(
-            GROUP_ID,
-            int(user_id),
-            context
-        )
-
-        if joined_channel and joined_group:
-
-            add_points(user_id, 2)
-            mark_mission_claimed(user_id)
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="menu")]
-            ])
-
-            await safe_edit(
-                query,
-                "🎉 Mission Completed!\n\n⭐ +2 Points Added",
-                keyboard
-            )
-
-        else:
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="menu")]
-            ])
-
-            await safe_edit(
-                query,
-                "❌ Please join Channel & Group first.",
-                keyboard
-            )
-
-    # ================= REDEEM =================
-    elif query.data == "redeem_menu":
-
-        points = user[2]
-
-        keyboard_rows = []
-
-        rewards = [
-            ("RM1 Credit", 3),
-            ("RM5 Credit", 10),
-            ("RM10 Credit", 20),
-            ("Touch 'n Go RM100", 200)
-        ]
-
-        for reward_text, pts in rewards:
-            if points >= pts:
+            if not keyboard_rows:
                 keyboard_rows.append([
-                    InlineKeyboardButton(
-                        f"{reward_text} ({pts} Points)",
-                        callback_data=f"redeem:{pts}:{reward_text}"
-                    )
+                    InlineKeyboardButton("❌ Not enough points yet", callback_data="not_enough_points")
                 ])
 
-        keyboard_rows.append([
-            InlineKeyboardButton("🔙 Back", callback_data="menu")
-        ])
+            keyboard_rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu")])
 
-        # STABLE PANEL UI
-        await query.message.reply_text(
-            text=f"🎁 Claim Reward\n\n⭐ Your Points: {points}",
-            reply_markup=InlineKeyboardMarkup(keyboard_rows)
-        )
+            await safe_edit(
+                query,
+                f"🎁 Claim Reward\n\n⭐ Your Points: {points}\n\n👇 Select available reward:",
+                InlineKeyboardMarkup(keyboard_rows)
+            )
 
-        return
+        elif data == "not_enough_points":
+            await safe_edit(
+                query,
+                "❌ Not enough points yet.\n\nInvite friends and complete missions to collect more points.",
+                back_to_menu_keyboard()
+            )
 
-    elif query.data.startswith("redeem:"):
+        elif data.startswith("redeem:"):
+            user = get_user(user_id) or user
 
-        _, pts, reward_text = query.data.split(":", 2)
+            try:
+                _, pts, reward_text = data.split(":", 2)
+                pts = int(pts)
+            except Exception:
+                await safe_edit(query, "⚠️ Invalid redeem request.", back_to_menu_keyboard())
+                return
 
-        pts = int(pts)
+            current_points = safe_int(user.get("points", 0))
+            if current_points < pts and not is_admin(user_id):
+                await safe_edit(
+                    query,
+                    "❌ Not enough points for this reward.",
+                    back_to_menu_keyboard()
+                )
+                return
 
-        username = query.from_user.username
-        username_text = f"@{username}" if username else "No Username"
+            pending = has_pending_redeem(user_id, reward_text)
+            if pending:
+                await safe_edit(
+                    query,
+                    "⏳ You already have a pending request for this reward.\n\nPlease wait for admin approval.",
+                    back_to_menu_keyboard()
+                )
+                return
 
-        request_id = create_redeem_request(
-            user_id,
-            username_text,
-            reward_text,
-            pts
-        )
+            username = query.from_user.username
+            username_text = f"@{username}" if username else "No Username"
 
-        for admin in ADMIN_IDS:
+            request_id = create_redeem_request(user_id, username_text, reward_text, pts)
+
+            for admin in ADMIN_IDS:
+                admin_keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Approve", callback_data=f"approve_redeem:{request_id}"),
+                        InlineKeyboardButton("❌ Reject", callback_data=f"reject_redeem:{request_id}"),
+                    ]
+                ])
+
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(admin),
+                        text=(
+                            f"🎁 New Redeem Request\n\n"
+                            f"👤 Username: {username_text}\n"
+                            f"🆔 User ID: {user_id}\n"
+                            f"🎁 Reward: {reward_text}\n"
+                            f"⭐ Points Needed: {pts}\n"
+                            f"⭐ User Current Points: {current_points}\n"
+                            f"📝 Request ID: {request_id}"
+                        ),
+                        reply_markup=admin_keyboard
+                    )
+                except Exception as e:
+                    logger.warning("Send redeem request to admin %s failed: %s", admin, e)
+
+            await safe_edit(
+                query,
+                "⏳ Redeem request submitted.\n\nAdmin will review your request.",
+                back_to_menu_keyboard()
+            )
+
+        elif data.startswith("approve_redeem:"):
+            if not is_admin(user_id):
+                await safe_edit(query, "❌ Admin only.")
+                return
+
+            request_id = int(data.split(":")[1])
+            success, message = approve_redeem_request(request_id)
+            await safe_edit(query, message)
+
+        elif data.startswith("reject_redeem:"):
+            if not is_admin(user_id):
+                await safe_edit(query, "❌ Admin only.")
+                return
+
+            request_id = int(data.split(":")[1])
+            success, message = reject_redeem_request(request_id)
+            await safe_edit(query, message)
+
+        # ================= GIFT =================
+        elif data == "gift":
+            user = get_user(user_id) or user
+
+            if safe_int(user.get("gift_claimed", 0)) == 1 and not is_admin(user_id):
+                await safe_edit(
+                    query,
+                    "✅ You already claimed the new join gift.",
+                    back_to_home_keyboard()
+                )
+                return
 
             keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "✅ Approve",
-                        callback_data=f"approve_redeem:{request_id}"
-                    ),
-                    InlineKeyboardButton(
-                        "❌ Reject",
-                        callback_data=f"reject_redeem:{request_id}"
-                    )
-                ]
+                [InlineKeyboardButton("🎁 Claim Gift", callback_data="claim_gift")],
+                [InlineKeyboardButton("🔙 Back", callback_data="back")],
             ])
 
-            try:
-                await context.bot.send_message(
-                    chat_id=int(admin),
-                    text=(
-                        f"🎁 New Redeem Request\n\n"
-                        f"👤 Username: {username_text}\n"
-                        f"🆔 User ID: {user_id}\n"
-                        f"🎁 Reward: {reward_text}\n"
-                        f"⭐ Points: {pts}"
-                    ),
-                    reply_markup=keyboard
+            await safe_edit(
+                query,
+                "🎁 Hadiah Member Baru\n\n"
+                "✅ Daftar akaun baru\n"
+                "✅ Deposit pertama RM20+\n"
+                "✅ Join Channel & Group dulu 😎\n\n"
+                "🎁 Reward Free:\n"
+                "RM38 Kredit Game 💸",
+                keyboard
+            )
+
+        elif data == "claim_gift":
+            user = get_user(user_id) or user
+
+            if safe_int(user.get("gift_claimed", 0)) == 1 and not is_admin(user_id):
+                await safe_edit(
+                    query,
+                    "✅ You already claimed the new join gift.",
+                    back_to_home_keyboard()
                 )
-            except:
-                pass
+                return
 
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data="menu")]
-        ])
+            username = query.from_user.username
+            username_text = f"@{username}" if username else "No Username"
 
-        await safe_edit(
-            query,
-            "⏳ Redeem request submitted.",
-            keyboard
-        )
+            for admin in ADMIN_IDS:
+                admin_keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Approve", callback_data=f"approve_gift:{user_id}"),
+                        InlineKeyboardButton("❌ Reject", callback_data=f"reject_gift:{user_id}"),
+                    ]
+                ])
 
-    elif query.data.startswith("approve_redeem:"):
-
-        if str(query.from_user.id) not in ADMIN_IDS:
-            return
-
-        request_id = int(query.data.split(":")[1])
-
-        req = get_redeem_request(request_id)
-
-        if not req:
-            return
-
-        _, target_user, _, reward_text, pts, status = req
-
-        deduct_points(target_user, pts)
-        update_redeem_status(request_id, "approved")
-
-        await safe_edit(query, "✅ Redeem Approved")
-
-    elif query.data.startswith("reject_redeem:"):
-
-        update_redeem_status(
-            int(query.data.split(":")[1]),
-            "rejected"
-        )
-
-        await safe_edit(query, "❌ Redeem Rejected")
-
-    # ================= GIFT =================
-    elif query.data == "gift":
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎁 Claim Gift", callback_data="claim_gift")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back")]
-        ])
-
-        await safe_edit(
-            query,
-            "🎁 Hadiah Member Baru\n\n"
-            "✅ Daftar akaun baru\n"
-            "✅ Deposit pertama RM20+\n"
-            "✅ Join Channel & Group dulu 😎\n\n"
-            "🎁 Reward Free:\n"
-            "RM38 Kredit Game 💸",
-            keyboard
-        )
-
-    elif query.data == "claim_gift":
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data="menu")]
-        ])
-
-        for admin in ADMIN_IDS:
-
-            admin_keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "✅ Approve",
-                        callback_data=f"approve_gift:{user_id}"
-                    ),
-                    InlineKeyboardButton(
-                        "❌ Reject",
-                        callback_data=f"reject_gift:{user_id}"
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(admin),
+                        text=(
+                            f"🎁 New Gift Request\n\n"
+                            f"👤 Username: {username_text}\n"
+                            f"🆔 User ID: {user_id}"
+                        ),
+                        reply_markup=admin_keyboard
                     )
-                ]
-            ])
+                except Exception as e:
+                    logger.warning("Send gift request to admin %s failed: %s", admin, e)
 
-            try:
-                username = query.from_user.username
-                username_text = f"@{username}" if username else "No Username"
+            await safe_edit(
+                query,
+                "⏳ Gift request submitted.\n\nAdmin will review your request.",
+                back_to_home_keyboard()
+            )
 
-                await context.bot.send_message(
-                    chat_id=int(admin),
-                    text=(
-                        f"🎁 New Gift Request\n\n"
-                        f"👤 Username: {username_text}\n"
-                        f"🆔 User ID: {user_id}"
-                    ),
-                    reply_markup=admin_keyboard
-                )
-            except:
-                pass
+        elif data.startswith("approve_gift:"):
+            if not is_admin(user_id):
+                await safe_edit(query, "❌ Admin only.")
+                return
 
-        await safe_edit(
-            query,
-            "⏳ Gift request submitted.",
-            keyboard
-        )
+            target = data.split(":")[1]
+            target_user = get_user(target)
 
-    elif query.data.startswith("approve_gift:"):
+            if not target_user:
+                await safe_edit(query, "❌ User not found.")
+                return
 
-        target = query.data.split(":")[1]
+            if safe_int(target_user.get("gift_claimed", 0)) == 1:
+                await safe_edit(query, "⚠️ Gift was already approved before.")
+                return
 
-        add_points(target, 38)
-        mark_gift_claimed(target)
+            add_points(target, 38)
+            mark_gift_claimed(target)
 
-        await safe_edit(query, "✅ Gift Approved")
+            await safe_edit(query, "✅ Gift Approved. +38 Points added.")
 
-    elif query.data.startswith("reject_gift:"):
+        elif data.startswith("reject_gift:"):
+            if not is_admin(user_id):
+                await safe_edit(query, "❌ Admin only.")
+                return
 
-        await safe_edit(query, "❌ Gift Rejected")
+            await safe_edit(query, "❌ Gift Rejected.")
 
-    elif query.data == "support":
+        elif data == "support":
+            keyboard = back_to_home_keyboard()
 
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back", callback_data="back")]
-        ])
+            await safe_edit(
+                query,
+                "🎧 Need Help?\n\n"
+                f"📲 Telegram:\n{SUPPORT_URL}",
+                keyboard
+            )
 
-        await safe_edit(
-            query,
-            "🎧 Need Help?\n\n"
-            "📲 Telegram:\n"
-            "https://t.me/JomJudi88vip",
-            keyboard
-        )
+        elif data == "back":
+            await safe_edit(query, get_main_text(), get_main_keyboard())
 
-    elif query.data == "back":
+        else:
+            await safe_edit(
+                query,
+                "⚠️ Unknown button. Please press /start again.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]])
+            )
 
-        await safe_edit(
-            query,
-            get_main_text(),
-            get_main_keyboard()
-        )
+    except Exception as e:
+        logger.exception("BUTTON ERROR: %s", e)
+        try:
+            await query.answer("System busy, please try again.", show_alert=False)
+        except Exception:
+            pass
+        try:
+            await query.message.reply_text(
+                "⚠️ System busy, please try again or press /start."
+            )
+        except Exception:
+            pass
 
 
-# ================= ADMIN =================
+# ================= ADMIN COMMANDS =================
+
 async def all_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if str(update.effective_user.id) not in ADMIN_IDS:
+    if not is_admin(update.effective_user.id):
         return
 
-    rows = get_all_users()
+    try:
+        rows = get_all_users()
+        lines = ["📊 All Users\n"]
 
-    lines = ["📊 All Users\n"]
+        for i, row in enumerate(rows, start=1):
+            lines.append(
+                f"{i}. {row.get('name') or 'User'}\n"
+                f"ID: {row.get('user_id')}\n"
+                f"⭐ {row.get('points', 0)} points\n"
+                f"👥 {row.get('invited_count', 0)} invites\n"
+            )
 
-    for i, row in enumerate(rows, start=1):
+        text = "\n".join(lines)
 
-        uid, name, points, invites = row
+        for i in range(0, len(text), 3500):
+            await update.message.reply_text(text[i:i + 3500])
 
-        lines.append(
-            f"{i}. {name}\n"
-            f"ID: {uid}\n"
-            f"⭐ {points} points\n"
-            f"👥 {invites} invites\n"
-        )
-
-    text = "\n".join(lines)
-
-    for i in range(0, len(text), 3500):
-        await update.message.reply_text(
-            text[i:i+3500]
-        )
-
+    except Exception as e:
+        logger.exception("all_users_cmd error: %s", e)
+        await update.message.reply_text("⚠️ Failed to load users.")
 
 
-
-# ================= ADMIN TEST =================
 async def admin_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if str(update.effective_user.id) not in ADMIN_IDS:
+    if not is_admin(update.effective_user.id):
         return
 
-    conn = get_conn()
-    cur = conn.cursor()
+    target_id = str(update.effective_user.id)
+    if context.args:
+        target_id = str(context.args[0])
 
-    cur.execute("""
-        UPDATE users
-        SET
-            last_lucky_claim='',
-            last_vip_claim='',
-            last_elite_claim=''
-        WHERE user_id=%s
-    """, (str(update.effective_user.id),))
+    try:
+        db_execute("""
+            UPDATE users
+            SET
+                last_lucky_claim='',
+                last_vip_claim='',
+                last_elite_claim=''
+            WHERE user_id=%s
+        """, (target_id,))
 
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    await update.message.reply_text(
-        "✅ Admin reward reset successful."
-    )
-
-
+        await update.message.reply_text(
+            f"✅ Reward reset successful for {target_id}."
+        )
+    except Exception as e:
+        logger.exception("admin_reset error: %s", e)
+        await update.message.reply_text("⚠️ Reset failed.")
 
 
 async def top_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if str(update.effective_user.id) not in ADMIN_IDS:
+    if not is_admin(update.effective_user.id):
         return
 
-    rows = get_top_invites()
+    try:
+        rows = get_top_invites()
+        lines = ["🏆 Top Invite Ranking\n"]
 
-    lines = ["🏆 Top Invite Ranking\n"]
+        for i, row in enumerate(rows, start=1):
+            lines.append(
+                f"{i}. {row.get('name') or 'User'}\n"
+                f"⭐ {row.get('points', 0)} points\n"
+                f"👥 {row.get('invited_count', 0)} invites\n"
+            )
 
-    for i, row in enumerate(rows, start=1):
+        await update.message.reply_text("\n".join(lines))
 
-        name, points, invites = row
-
-        lines.append(
-            f"{i}. {name}\n"
-            f"⭐ {points} points\n"
-            f"👥 {invites} invites\n"
-        )
-
-    text = "\n".join(lines)
-
-    await update.message.reply_text(text)
-
-
+    except Exception as e:
+        logger.exception("top_users_cmd error: %s", e)
+        await update.message.reply_text("⚠️ Failed to load ranking.")
 
 
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if str(update.effective_user.id) not in ADMIN_IDS:
+    if not is_admin(update.effective_user.id):
         return
 
     if not context.args:
-        await update.message.reply_text(
-            "Usage: /broadcast your message"
-        )
+        await update.message.reply_text("Usage: /broadcast your message")
         return
 
     message = " ".join(context.args)
 
-    users = get_all_users()
+    try:
+        users = get_all_users()
+        success = 0
+        failed = 0
 
-    success = 0
+        for row in users:
+            target_user_id = row.get("user_id")
+            try:
+                await context.bot.send_message(
+                    chat_id=int(target_user_id),
+                    text=message
+                )
+                success += 1
+            except Exception:
+                failed += 1
 
-    for row in users:
+        await update.message.reply_text(
+            f"✅ Broadcast sent to {success} users.\n❌ Failed: {failed}"
+        )
 
-        user_id = row[0]
-
-        try:
-            await context.bot.send_message(
-                chat_id=int(user_id),
-                text=message
-            )
-            success += 1
-        except:
-            pass
-
-    await update.message.reply_text(
-        f"✅ Broadcast sent to {success} users."
-    )
-
-
+    except Exception as e:
+        logger.exception("broadcast_cmd error: %s", e)
+        await update.message.reply_text("⚠️ Broadcast failed.")
 
 
 async def addpoints_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if str(update.effective_user.id) not in ADMIN_IDS:
+    if not is_admin(update.effective_user.id):
         return
 
     if len(context.args) < 2:
-
-        await update.message.reply_text(
-            "Usage: /addpoints USER_ID POINTS"
-        )
+        await update.message.reply_text("Usage: /addpoints USER_ID POINTS")
         return
 
-    target_user = context.args[0]
-    points = int(context.args[1])
+    target_user = str(context.args[0])
+    points = safe_int(context.args[1])
 
-    add_points(target_user, points)
+    try:
+        ensure_user(target_user, "User")
+        add_points(target_user, points)
 
-    await update.message.reply_text(
-        f"✅ Added {points} points to {target_user}"
-    )
+        await update.message.reply_text(
+            f"✅ Added {points} points to {target_user}"
+        )
+    except Exception as e:
+        logger.exception("addpoints_cmd error: %s", e)
+        await update.message.reply_text("⚠️ Add points failed.")
+
+
+async def setpoints_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /setpoints USER_ID POINTS")
+        return
+
+    target_user = str(context.args[0])
+    points = max(safe_int(context.args[1]), 0)
+
+    try:
+        ensure_user(target_user, "User")
+        db_execute("UPDATE users SET points=%s WHERE user_id=%s", (points, target_user))
+
+        await update.message.reply_text(
+            f"✅ Set {target_user} points to {points}"
+        )
+    except Exception as e:
+        logger.exception("setpoints_cmd error: %s", e)
+        await update.message.reply_text("⚠️ Set points failed.")
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.exception("Unhandled Telegram error: %s", context.error)
 
 
 # ================= RUN =================
-init_db()
 
-app = ApplicationBuilder().token(TOKEN).build()
+def main():
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN is missing.")
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is missing.")
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("all_users", all_users_cmd))
-app.add_handler(CommandHandler("top_users", top_users_cmd))
-app.add_handler(CommandHandler("broadcast", broadcast_cmd))
-app.add_handler(CommandHandler("addpoints", addpoints_cmd))
-app.add_handler(CommandHandler("resetreward", admin_reset))
-app.add_handler(CallbackQueryHandler(button))
+    init_db()
 
-print("Bot Running...")
-app.run_polling(drop_pending_updates=True)
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .connect_timeout(20)
+        .read_timeout(20)
+        .write_timeout(20)
+        .pool_timeout(20)
+        .build()
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("all_users", all_users_cmd))
+    app.add_handler(CommandHandler("top_users", top_users_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    app.add_handler(CommandHandler("addpoints", addpoints_cmd))
+    app.add_handler(CommandHandler("setpoints", setpoints_cmd))
+    app.add_handler(CommandHandler("resetreward", admin_reset))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_error_handler(error_handler)
+
+    logger.info("Bot Running...")
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
