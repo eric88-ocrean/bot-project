@@ -811,20 +811,20 @@ def get_main_keyboard():
 
 def get_main_text():
     return (
-        "🎁 Welcome to JomJudi88 Bot Rewards 🔥\n\n"
-        "🚀 Sistem Reward & Bonus untuk player Malaysia 🇲🇾\n\n"
-        "💸 Main sambil collect reward setiap hari!\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "✅ Invite & unlock VIP rewards\n"
-        "✅ Claim points & redeem hadiah\n"
-        "✅ Touch 'n Go RM100\n"
-        "✅ Reward update setiap hari\n\n"
-        "━━━━━━━━━━━━━━\n\n"
-        "🧠 Sistem Auto Layan Diri\n"
-        "✔️ Deposit & withdraw auto\n"
-        "✔️ Support 24/7\n"
-        "✔️ Privasi terjamin 🔐\n\n"
-        "👇 Pilih menu di bawah untuk mula"
+        "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 𝗥𝗘𝗪𝗔𝗥𝗗𝗦 🔥\n\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "💸 Main & kumpul reward setiap hari\n"
+        "🎯 Claim point dan redeem hadiah menarik\n"
+        "👑 Invite member untuk unlock VIP reward\n"
+        "💰 Peluang dapat Touch ’n Go RM100\n\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "⚡️ 𝗔𝗨𝗧𝗢 𝗦𝗘𝗥𝗩𝗜𝗖𝗘 𝟮𝟰/𝟳\n\n"
+        "✔️ Deposit pantas\n"
+        "✔️ Withdraw automatik\n"
+        "✔️ Support online anytime\n"
+        "✔️ Privasi dijamin selamat 🔐\n\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "👇 Tekan menu di bawah untuk mula sekarang 🚀"
     )
 
 
