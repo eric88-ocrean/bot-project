@@ -791,16 +791,16 @@ def reject_gift_request(target_user_id, admin_id) -> Tuple[bool, str, Optional[s
 def get_main_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔐 Daftar Akaun", url=REGISTER_URL),
+            InlineKeyboardButton("🔐 Register", url=REGISTER_URL),
             InlineKeyboardButton("💰 Earn Rewards", callback_data="menu"),
         ],
         [
-            InlineKeyboardButton("🎁 New Join Free RM38", callback_data="gift"),
-            InlineKeyboardButton("🎁 Daily Check In", callback_data="reward_center"),
+            InlineKeyboardButton("🎁 Free RM38", callback_data="gift"),
+            InlineKeyboardButton("🎁 Check In", callback_data="reward_center"),
         ],
         [
-            InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL),
-            InlineKeyboardButton("👥 Join Group", url=GROUP_URL),
+            InlineKeyboardButton("📢 Channel", url=CHANNEL_URL),
+            InlineKeyboardButton("👥 Group", url=GROUP_URL),
         ],
         [
             InlineKeyboardButton("🔞 Amoi Manja", url=AMOI_MANJA_URL),
@@ -812,19 +812,13 @@ def get_main_keyboard():
 def get_main_text():
     return (
         "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 𝗥𝗘𝗪𝗔𝗥𝗗𝗦 🔥\n\n"
-        "━━━━━━━━━━━━━━━\n\n"
-        "💸 Main & kumpul reward setiap hari\n"
-        "🎯 Claim point dan redeem hadiah menarik\n"
-        "👑 Invite member untuk unlock VIP reward\n"
-        "💰 Peluang dapat Touch ’n Go RM100\n\n"
-        "━━━━━━━━━━━━━━━\n\n"
-        "⚡️ 𝗔𝗨𝗧𝗢 𝗦𝗘𝗥𝗩𝗜𝗖𝗘 𝟮𝟰/𝟳\n\n"
-        "✔️ Deposit pantas\n"
-        "✔️ Withdraw automatik\n"
-        "✔️ Support online anytime\n"
-        "✔️ Privasi dijamin selamat 🔐\n\n"
-        "━━━━━━━━━━━━━━━\n\n"
-        "👇 Tekan menu di bawah untuk mula sekarang 🚀"
+        "💸 Main & collect reward setiap hari\n"
+        "🎯 Claim points & redeem hadiah\n"
+        "👑 Unlock VIP rewards\n"
+        "💰 Touch ’n Go RM100\n\n"
+        "⚡ Auto Deposit & Withdraw 24/7\n"
+        "🔐 Support & Privasi Terjamin\n\n"
+        "👇 Pilih menu di bawah 🚀"
     )
 
 
