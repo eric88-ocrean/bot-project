@@ -60,6 +60,7 @@ GROUP_URL = os.getenv("GROUP_URL", "https://t.me/jomjudi88official")
 REGISTER_URL = os.getenv("REGISTER_URL", "https://jomjudi88.live/my/register/?referral=JJ27817922")
 AMOI_MANJA_URL = os.getenv("AMOI_MANJA_URL", "https://t.me/JomJManja_bot")
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/JomJudi88vip")
+HOME_BANNER_FILE_ID = os.getenv("HOME_BANNER_FILE_ID", "").strip()
 
 TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
@@ -91,6 +92,7 @@ logger = logging.getLogger("jomjudi88-bot-v4")
 
 DB_POOL: Optional[SimpleConnectionPool] = None
 USER_CALLBACK_LAST_SEEN = {}
+START_LOCK = {}
 
 
 # ================= HELPERS =================
@@ -979,21 +981,63 @@ async def safe_edit(query, text, reply_markup=None):
 
 
 async def send_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Optimized home sender using Telegram file_id cache.
+    Much faster than re-uploading banner.jpg every /start.
+    """
+
     try:
+        # FAST MODE: use Telegram CDN file_id
+        if HOME_BANNER_FILE_ID:
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=HOME_BANNER_FILE_ID,
+                caption=get_main_text(),
+                reply_markup=get_main_keyboard(),
+            )
+            return
+
+        # FIRST TIME MODE: upload local image once
         if os.path.exists("banner.jpg"):
             with open("banner.jpg", "rb") as photo:
-                await context.bot.send_photo(
+                msg = await context.bot.send_photo(
                     chat_id=update.effective_chat.id,
                     photo=photo,
                     caption=get_main_text(),
                     reply_markup=get_main_keyboard(),
                 )
-        else:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=get_main_text(),
-                reply_markup=get_main_keyboard(),
-            )
+
+                # IMPORTANT:
+                # Copy this file_id into HOME_BANNER_FILE_ID env
+                try:
+                    file_id = msg.photo[-1].file_id
+                    logger.info("HOME_BANNER_FILE_ID=%s", file_id)
+                    print("
+==============================")
+                    print("COPY THIS FILE_ID:")
+                    print(file_id)
+                    print("==============================
+")
+                except Exception:
+                    pass
+
+            return
+
+        # fallback text mode
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=get_main_text(),
+            reply_markup=get_main_keyboard(),
+        )
+
+    except Exception as e:
+        logger.warning("Banner/send_photo error, fallback send_message: %s", e)
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=get_main_text(),
+            reply_markup=get_main_keyboard(),
+        )
     except Exception as e:
         logger.warning("Banner/send_photo error, fallback send_message: %s", e)
         await context.bot.send_message(
@@ -1021,6 +1065,15 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         user_id = str(user.id)
         user_name = user.first_name or "User"
+
+        # Prevent spam multiple /start clicks
+        current_time = time.time()
+        last_start = START_LOCK.get(user_id, 0)
+
+        if current_time - last_start < 2:
+            return
+
+        START_LOCK[user_id] = current_time
         ensure_user(user_id, user_name)
 
         if contact.user_id and str(contact.user_id) != user_id:
@@ -1263,6 +1316,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         user_id = str(user.id)
         user_name = user.first_name or "User"
+
+        # Prevent spam multiple /start clicks
+        current_time = time.time()
+        last_start = START_LOCK.get(user_id, 0)
+
+        if current_time - last_start < 2:
+            return
+
+        START_LOCK[user_id] = current_time
 
         referrer_id = str(context.args[0]).strip() if context.args else None
         existing = get_user(user_id)
