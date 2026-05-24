@@ -1674,6 +1674,18 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif data == "claim_gift":
+            joined_channel = await is_user_joined(CHANNEL_ID, user_id, context)
+            joined_group = await is_user_joined(GROUP_ID, user_id, context)
+
+            if not joined_channel or not joined_group:
+                await safe_edit(
+                    query,
+                    "❌ Please join Channel & Group first before claiming Free RM38.\n\n"
+                    "⚠️ If you already joined but still cannot claim, make sure the bot is admin in the channel/group.",
+                    kb_back_home(),
+                )
+                return
+
             username = query.from_user.username
             username_text = f"@{username}" if username else "No Username"
             ok, msg, request_id = create_gift_request_locked(user_id, username_text)
