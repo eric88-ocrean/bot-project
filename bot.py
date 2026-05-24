@@ -895,11 +895,7 @@ def get_main_keyboard():
             InlineKeyboardButton("🎁 Check In", callback_data="reward_center"),
         ],
         [
-            InlineKeyboardButton("📢 Channel", url=CHANNEL_URL),
-            InlineKeyboardButton("👥 Group", url=GROUP_URL),
-        ],
-        [
-            InlineKeyboardButton("🔞 Amoi Manja", url=AMOI_MANJA_URL),
+            InlineKeyboardButton("🌐 Community", callback_data="community"),
             InlineKeyboardButton("🎧 Support", callback_data="support"),
         ],
     ])
@@ -1731,6 +1727,24 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(query, message)
             if success and target_user:
                 await safe_send_user(context, target_user, "❌ Your new join gift request was rejected.")
+
+        elif data == "community":
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📢 Official Channel", url=CHANNEL_URL)],
+                [InlineKeyboardButton("👥 VIP Group", url=GROUP_URL)],
+                [InlineKeyboardButton("🔞 Amoi Manja", url=AMOI_MANJA_URL)],
+                [InlineKeyboardButton("🔙 Back", callback_data="back")],
+            ])
+
+            await safe_edit(
+                query,
+                "🌐 JOMJUDI88 COMMUNITY\n\n"
+                "📢 Official Updates\n"
+                "👥 VIP Member Group\n"
+                "🔞 Exclusive Amoi Content\n\n"
+                "👇 Choose below:",
+                keyboard,
+            )
 
         elif data == "support":
             await safe_edit(
