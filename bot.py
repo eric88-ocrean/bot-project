@@ -1733,7 +1733,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_send_user(context, target_user, "❌ Your new join gift request was rejected.")
 
         elif data == "support":
-            await safe_edit(query, f"🎧 Need Help?\n\n📲 Telegram:\n{SUPPORT_URL}", kb_back_home())
+            await safe_edit(
+                query,
+                f"🟢 JOMJUDI88 SUPPORT\n\n"
+                f"⚡ Fast Response\n"
+                f"🔐 Secure & Private\n"
+                f"🎧 24/7 Live Assistance\n\n"
+                f"Tap the link below to contact support.\n"
+                f"{SUPPORT_URL}",
+                kb_back_home(),
+            )
 
         elif data == "back":
             await safe_edit(query, get_main_text(), get_main_keyboard())
@@ -1841,22 +1850,97 @@ async def pending_gift_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    if not context.args:
-        await update.message.reply_text("Usage: /broadcast your message")
-        return
-    message = " ".join(context.args)
+
     users = get_all_users()
     success = 0
     failed = 0
+
+    # MEDIA BROADCAST
+    if update.message.reply_to_message:
+        replied = update.message.reply_to_message
+        caption = " ".join(context.args) if context.args else (replied.caption or "")
+
+        for row in users:
+            target_user_id = row.get("user_id")
+
+            try:
+                if replied.photo:
+                    await context.bot.send_photo(
+                        chat_id=int(target_user_id),
+                        photo=replied.photo[-1].file_id,
+                        caption=caption,
+                    )
+
+                elif replied.video:
+                    await context.bot.send_video(
+                        chat_id=int(target_user_id),
+                        video=replied.video.file_id,
+                        caption=caption,
+                    )
+
+                elif replied.animation:
+                    await context.bot.send_animation(
+                        chat_id=int(target_user_id),
+                        animation=replied.animation.file_id,
+                        caption=caption,
+                    )
+
+                else:
+                    await context.bot.send_message(
+                        chat_id=int(target_user_id),
+                        text=caption or "📢 Broadcast"
+                    )
+
+                success += 1
+
+            except Exception:
+                failed += 1
+
+        audit_log(
+            update.effective_user.id,
+            "media_broadcast",
+            f"success={success} failed={failed}"
+        )
+
+        await update.message.reply_text(
+            f"✅ Media broadcast sent to {success} users.\n❌ Failed: {failed}"
+        )
+        return
+
+    # TEXT BROADCAST
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/broadcast your message\n\n"
+            "OR\n"
+            "Reply photo/video/gif with /broadcast"
+        )
+        return
+
+    message = " ".join(context.args)
+
     for row in users:
         target_user_id = row.get("user_id")
+
         try:
-            await context.bot.send_message(chat_id=int(target_user_id), text=message)
+            await context.bot.send_message(
+                chat_id=int(target_user_id),
+                text=message
+            )
             success += 1
+
         except Exception:
             failed += 1
-    audit_log(update.effective_user.id, "broadcast", f"success={success} failed={failed}")
-    await update.message.reply_text(f"✅ Broadcast sent to {success} users.\n❌ Failed: {failed}")
+
+    audit_log(
+        update.effective_user.id,
+        "broadcast",
+        f"success={success} failed={failed}"
+    )
+
+    await update.message.reply_text(
+        f"✅ Broadcast sent to {success} users.\n❌ Failed: {failed}"
+    )
 
 
 async def addpoints_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
