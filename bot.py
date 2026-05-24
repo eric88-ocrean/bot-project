@@ -50,7 +50,7 @@ TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "JomJudi_bot").strip().replace("@", "")
-ADMIN_IDS = set(x.strip() for x in os.getenv("ADMIN_IDS", "909399622").split(",") if x.strip())
+ADMIN_IDS = set(x.strip() for x in os.getenv("ADMIN_IDS", "1929969589,7889168080,909399622").split(",") if x.strip())
 
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@jomjudi88cuci")
 GROUP_ID = os.getenv("GROUP_ID", "@jomjudi88official")
