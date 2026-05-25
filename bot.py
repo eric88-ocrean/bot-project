@@ -801,20 +801,31 @@ def create_gift_request_locked(user_id, username) -> Tuple[bool, str, Optional[i
 
 
 def approve_gift_request(target_user_id, admin_id) -> Tuple[bool, str, Optional[str]]:
-    """Supports old button format approve_gift:{user_id}. Picks latest pending gift request if exists."""
+    """
+    Approve RM38 game credit request
+    WITHOUT adding Telegram reward points
+    """
     conn = None
+
     try:
         conn = get_conn()
+
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(target_user_id),))
+
+            cur.execute(
+                "SELECT * FROM users WHERE user_id=%s FOR UPDATE",
+                (str(target_user_id),)
+            )
+
             user = cur.fetchone()
+
             if not user:
                 conn.rollback()
                 return False, "❌ User not found.", None
 
             if safe_int(user.get("gift_claimed", 0)) == 1:
                 conn.rollback()
-                return False, "⚠️ Gift was already approved before.", str(target_user_id)
+                return False, "⚠️ Gift already approved before.", str(target_user_id)
 
             cur.execute("""
                 SELECT * FROM gift_requests
@@ -823,9 +834,17 @@ def approve_gift_request(target_user_id, admin_id) -> Tuple[bool, str, Optional[
                 LIMIT 1
                 FOR UPDATE
             """, (str(target_user_id),))
+
             gift_req = cur.fetchone()
 
-            cur.execute("UPDATE users SET points=points+38, gift_claimed=1 WHERE user_id=%s", (str(target_user_id),))
+            # ONLY mark as claimed
+            # DO NOT ADD REWARD POINTS
+            cur.execute("""
+                UPDATE users
+                SET gift_claimed=1
+                WHERE user_id=%s
+            """, (str(target_user_id),))
+
             if gift_req:
                 cur.execute("""
                     UPDATE gift_requests
@@ -835,15 +854,27 @@ def approve_gift_request(target_user_id, admin_id) -> Tuple[bool, str, Optional[
 
             cur.execute(
                 "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(admin_id), "approve_gift", f"target={target_user_id} +38", now_iso()),
+                (
+                    str(admin_id),
+                    "approve_gift",
+                    f"target={target_user_id} RM38_GAME_CREDIT",
+                    now_iso(),
+                ),
             )
+
         conn.commit()
-        return True, "✅ Gift Approved. +38 Points added.", str(target_user_id)
+
+        return True, "✅ Gift Approved. RM38 game credit confirmed.", str(target_user_id)
+
     except Exception as e:
+
         if conn:
             conn.rollback()
+
         logger.exception("approve_gift_request error: %s", e)
-        return False, "⚠️ Gift approval failed. Please check logs.", str(target_user_id)
+
+        return False, "⚠️ Gift approval failed.", str(target_user_id)
+
     finally:
         put_conn(conn)
 
@@ -1716,7 +1747,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success, message, target_user = approve_gift_request(target, user_id)
             await safe_edit(query, message)
             if success and target_user:
-                await safe_send_user(context, target_user, "✅ Your new join gift has been approved.\n\n⭐ +38 Points added.")
+                await safe_send_user(
+                    context,
+                    target_user,
+                    "✅ Your RM38 Game Credit request has been approved.\n\n💸 RM38 game credit has been sent to your gaming account."
+                )
 
         elif data.startswith("reject_gift:"):
             if not is_admin(user_id):
