@@ -20,6 +20,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple
+from urllib.parse import quote_plus
 
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
@@ -32,6 +33,7 @@ from telegram import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    InputMediaPhoto,
 )
 from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter, Forbidden
 from telegram.ext import (
@@ -61,6 +63,8 @@ REGISTER_URL = os.getenv("REGISTER_URL", "https://jomjudi88.live/my/register/?re
 AMOI_MANJA_URL = os.getenv("AMOI_MANJA_URL", "https://t.me/JomJManja_bot")
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/JomJudi88vip")
 HOME_BANNER_FILE_ID = os.getenv("HOME_BANNER_FILE_ID", "").strip()
+SHARE_BANNER_FILE_ID = os.getenv("SHARE_BANNER_FILE_ID", "").strip()
+SHARE_BANNER_PATH = os.getenv("SHARE_BANNER_PATH", "share_earn.jpg").strip()
 
 TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
@@ -956,6 +960,69 @@ def kb_back_home():
 def kb_back_reward_center():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="reward_center")]])
 
+def get_share_earn_caption(user_id: str) -> str:
+    link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+    return (
+        "💰 Share & Earn Lagi!\n\n"
+        "Jom ajak kawan join & collect reward sama-sama 🔥\n\n"
+        "🔗 Link Boss:\n\n"
+        f"{link}"
+    )
+
+
+def get_share_earn_keyboard(user_id: str):
+    link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+    share_text = "Jom join JomJudi88 & collect reward sama-sama 🔥"
+    share_url = f"https://t.me/share/url?url={quote_plus(link)}&text={quote_plus(share_text)}"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Share Kepada Kawan", url=share_url)],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu")],
+    ])
+
+
+async def send_share_earn_page(query, user_id: str):
+    caption = get_share_earn_caption(user_id)
+    keyboard = get_share_earn_keyboard(user_id)
+
+    photo_source = None
+    opened_file = None
+    try:
+        if SHARE_BANNER_FILE_ID:
+            photo_source = SHARE_BANNER_FILE_ID
+        elif SHARE_BANNER_PATH and os.path.exists(SHARE_BANNER_PATH):
+            opened_file = open(SHARE_BANNER_PATH, "rb")
+            photo_source = opened_file
+
+        if photo_source:
+            try:
+                await query.edit_message_media(
+                    media=InputMediaPhoto(media=photo_source, caption=caption),
+                    reply_markup=keyboard,
+                )
+                return
+            except BadRequest as e:
+                logger.warning("edit share earn media failed, fallback send_photo: %s", e)
+
+            try:
+                await query.message.reply_photo(
+                    photo=photo_source,
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+                return
+            except Exception as e:
+                logger.warning("send share earn photo failed, fallback text: %s", e)
+
+        await safe_edit(query, caption, keyboard)
+
+    finally:
+        if opened_file:
+            try:
+                opened_file.close()
+            except Exception:
+                pass
+
+
 
 async def safe_send_user(context: ContextTypes.DEFAULT_TYPE, user_id: str, text: str):
     try:
@@ -1518,14 +1585,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif data == "link":
-            link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-            await safe_edit(
-                query,
-                f"💰 Share & Earn Lagi!\n\n"
-                f"Jom ajak kawan join & collect reward sama-sama 🔥\n\n"
-                f"🔗 Link Boss:\n\n{link}",
-                kb_back_menu(),
-            )
+            await send_share_earn_page(query, user_id)
 
         elif data == "reward_center":
             keyboard = InlineKeyboardMarkup([
