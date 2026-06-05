@@ -1126,6 +1126,7 @@ TEXT = {
         "verify_duplicate": "❌ Nombor telefon ini sudah didaftarkan.",
         "verify_success": "✅ Nombor Malaysia berjaya disahkan.\n\nSelamat datang ke JomJudi88 Rewards 🔥",
         "verify_busy": "⚠️ Sistem pengesahan sibuk. Sila cuba lagi.",
+        "verify_manual_phone_reject": "❌ Jangan taip nombor telefon secara manual.\n\nSila tekan butang 📱 Sahkan Nombor Malaysia di bawah, kemudian pilih Share Contact.\n\nJika butang tidak nampak, tekan icon keyboard/menu di sebelah kiri bawah Telegram.",
         "must_verify": "🇲🇾 Pengguna Malaysia Sahaja\n\nSila tekan /start dan sahkan nombor telefon anda dahulu.",
         "register": "🔐 Daftar",
         "earn": "💰 Kumpul Rewards",
@@ -1203,6 +1204,7 @@ TEXT = {
         "verify_duplicate": "❌ This phone number is already registered.",
         "verify_success": "✅ Malaysia number verified successfully.\n\nWelcome to JomJudi88 Rewards 🔥",
         "verify_busy": "⚠️ Verification system busy. Please try again.",
+        "verify_manual_phone_reject": "❌ Please do not type your phone number manually.\n\nTap the 📱 Verify Malaysia Number button below, then choose Share Contact.\n\nIf you cannot see the button, tap the keyboard/menu icon at the bottom-left of Telegram.",
         "must_verify": "🇲🇾 Malaysia Users Only\n\nPlease press /start and verify your phone number first.",
         "register": "🔐 Register",
         "earn": "💰 Earn Rewards",
@@ -1280,6 +1282,7 @@ TEXT = {
         "verify_duplicate": "❌ 这个电话号码已经注册过了。",
         "verify_success": "✅ 马来西亚号码验证成功。\n\n欢迎来到 JomJudi88 Rewards 🔥",
         "verify_busy": "⚠️ 验证系统繁忙，请再试一次。",
+        "verify_manual_phone_reject": "❌ 请不要手写电话号码。\n\n请点击下面的 📱 验证马来西亚号码按钮，然后选择 Share Contact。\n\n如果看不到按钮，请点击 Telegram 左下角的键盘/Menu 图标。",
         "must_verify": "🇲🇾 仅限马来西亚用户\n\n请先按 /start 并验证电话号码。",
         "register": "🔐 注册",
         "earn": "💰 赚奖励",
@@ -1701,6 +1704,46 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+
+
+
+
+async def text_phone_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles users who type their phone number manually instead of pressing the
+    Telegram contact-share button. Manual text cannot prove ownership, so we
+    guide them back to the proper Verify Malaysia Number button.
+    """
+    try:
+        if not update.effective_user or not update.effective_message:
+            return
+
+        user_id = str(update.effective_user.id)
+        user_name = update.effective_user.first_name or "User"
+        ensure_user(user_id, user_name)
+
+        if is_phone_verified(user_id):
+            return
+
+        text = (update.effective_message.text or "").strip()
+        if not text:
+            return
+
+        # Any typed message before verification should guide the user to share
+        # Telegram contact. This covers typed numbers like 013xxxxxxx.
+        await update.effective_message.reply_text(
+            tr(user_id, "verify_manual_phone_reject"),
+            reply_markup=get_verify_keyboard(user_id),
+        )
+
+    except Exception as e:
+        logger.exception("TEXT_PHONE_HANDLER_ERROR: %s", e)
+        try:
+            await update.effective_message.reply_text(
+                tr(str(update.effective_user.id), "verify_busy") if update.effective_user else "⚠️ Verification system busy. Please try again."
+            )
+        except Exception:
+            pass
 
 
 # ================= ADMIN PANEL UI =================
@@ -2676,6 +2719,7 @@ def build_app():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_phone_handler))
     app.add_handler(CommandHandler("help_admin", help_admin_cmd))
     app.add_handler(CommandHandler("all_users", all_users_cmd))
     app.add_handler(CommandHandler("top_users", top_users_cmd))
