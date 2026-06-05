@@ -243,7 +243,8 @@ def init_db():
                     phone_verified_at TEXT DEFAULT '',
                     invite_rewarded INTEGER DEFAULT 0,
                     last_seen_at TEXT DEFAULT '',
-                    created_at TEXT DEFAULT ''
+                    created_at TEXT DEFAULT '',
+                    language TEXT DEFAULT ''
                 )
             """)
 
@@ -264,6 +265,7 @@ def init_db():
                 "invite_rewarded INTEGER DEFAULT 0",
                 "last_seen_at TEXT DEFAULT ''",
                 "created_at TEXT DEFAULT ''",
+                "language TEXT DEFAULT ''",
             ]
             for col in user_columns:
                 cur.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col}")
@@ -343,6 +345,22 @@ def audit_log(user_id, action, detail=""):
 
 def get_user(user_id):
     return db_fetchone("SELECT * FROM users WHERE user_id=%s", (str(user_id),))
+
+
+def set_user_language(user_id, language):
+    lang = str(language or "ms").lower()
+    if lang not in ["ms", "en", "zh"]:
+        lang = "ms"
+    db_execute("UPDATE users SET language=%s WHERE user_id=%s", (lang, str(user_id)))
+
+
+def get_user_language(user_id) -> str:
+    try:
+        user = get_user(user_id)
+        lang = (user or {}).get("language") or "ms"
+        return lang if lang in ["ms", "en", "zh"] else "ms"
+    except Exception:
+        return "ms"
 
 
 def normalize_phone(phone: str) -> str:
@@ -557,11 +575,11 @@ def claim_daily_reward(user_id: str, reward_type: str, min_invites: int, reward_
                     user.get("last_elite_claim") == today
                 ):
                     conn.rollback()
-                    return False, "❌ You already claimed today's reward.\n\n⏰ Please come back after 12AM Malaysia time."
+                    return False, tr(user_id, "daily_claimed")
 
                 if safe_int(user.get("invited_count", 0)) < min_invites:
                     conn.rollback()
-                    return False, f"🔒 {title_map[reward_type]} unlocks at {min_invites} invites."
+                    return False, tr(user_id, "unlock_invites", title=title_map[reward_type], invites=min_invites)
 
             reward = random_reward(reward_pool)
             cur.execute(
@@ -577,8 +595,8 @@ def claim_daily_reward(user_id: str, reward_type: str, min_invites: int, reward_
         conn.commit()
 
         if reward > 0:
-            return True, f"🎉 Reward Berjaya Dibuka!\n\n⭐ +{reward} Points masuk 🔥"
-        return True, "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥"
+            return True, tr(user_id, "reward_win", reward=reward)
+        return True, tr(user_id, "reward_zero")
     except Exception as e:
         if conn:
             conn.rollback()
@@ -601,7 +619,7 @@ def claim_mission_reward(user_id: str) -> Tuple[bool, str]:
 
             if safe_int(user.get("mission_claimed", 0)) == 1 and not is_admin(user_id):
                 conn.rollback()
-                return False, "✅ You already claimed mission rewards."
+                return False, tr(user_id, "mission_claimed")
 
             cur.execute("UPDATE users SET points=points+2, mission_claimed=1 WHERE user_id=%s", (str(user_id),))
             cur.execute(
@@ -609,7 +627,7 @@ def claim_mission_reward(user_id: str) -> Tuple[bool, str]:
                 (str(user_id), "mission_claim", "+2 points", now_iso()),
             )
         conn.commit()
-        return True, "🎉 Mission Completed!\n\n⭐ +2 Points Added"
+        return True, tr(user_id, "mission_completed")
     except Exception as e:
         if conn:
             conn.rollback()
@@ -632,7 +650,7 @@ def create_redeem_request_locked(user_id, username, reward_text, points_needed) 
 
             if safe_int(user.get("points", 0)) < int(points_needed) and not is_admin(user_id):
                 conn.rollback()
-                return False, "❌ Not enough points for this reward.", None
+                return False, tr(user_id, "not_enough_text"), None
 
             cur.execute("""
                 SELECT id FROM redeem_requests
@@ -642,7 +660,7 @@ def create_redeem_request_locked(user_id, username, reward_text, points_needed) 
             pending = cur.fetchone()
             if pending:
                 conn.rollback()
-                return False, "⏳ You already have a pending request for this reward.\n\nPlease wait for admin approval.", pending["id"]
+                return False, tr(user_id, "redeem_pending"), pending["id"]
 
             cur.execute("""
                 INSERT INTO redeem_requests
@@ -659,7 +677,7 @@ def create_redeem_request_locked(user_id, username, reward_text, points_needed) 
             )
 
         conn.commit()
-        return True, "⏳ Redeem request submitted.\n\nAdmin will review your request.", request_id
+        return True, tr(user_id, "redeem_submitted"), request_id
     except Exception as e:
         if conn:
             conn.rollback()
@@ -774,13 +792,13 @@ def create_gift_request_locked(user_id, username) -> Tuple[bool, str, Optional[i
 
             if safe_int(user.get("gift_claimed", 0)) == 1 and not is_admin(user_id):
                 conn.rollback()
-                return False, "✅ You already claimed the new join gift.", None
+                return False, tr(user_id, "gift_claimed"), None
 
             cur.execute("SELECT id FROM gift_requests WHERE user_id=%s AND status='pending' LIMIT 1", (str(user_id),))
             pending = cur.fetchone()
             if pending:
                 conn.rollback()
-                return False, "⏳ You already have a pending gift request.\n\nPlease wait for admin approval.", pending["id"]
+                return False, tr(user_id, "gift_pending"), pending["id"]
 
             cur.execute("""
                 INSERT INTO gift_requests (user_id, username, status, created_at)
@@ -794,7 +812,7 @@ def create_gift_request_locked(user_id, username) -> Tuple[bool, str, Optional[i
                 (str(user_id), "gift_request", f"id={request_id}", now_iso()),
             )
         conn.commit()
-        return True, "⏳ Gift request submitted.\n\nAdmin will review your request.", request_id
+        return True, tr(user_id, "gift_submitted"), request_id
     except Exception as e:
         if conn:
             conn.rollback()
@@ -917,66 +935,303 @@ def reject_gift_request(target_user_id, admin_id) -> Tuple[bool, str, Optional[s
         put_conn(conn)
 
 
-# ================= UI =================
+# ================= UI / LANGUAGE =================
 
-def get_main_keyboard():
+TEXT = {
+    "ms": {
+        "language_title": "🌐 Sila pilih bahasa anda\n\n🇲🇾 Bahasa Melayu\n🇬🇧 English\n🇨🇳 中文",
+        "language_saved": "✅ Bahasa berjaya ditetapkan.",
+        "verify_button": "📱 Sahkan Nombor Malaysia",
+        "verify_placeholder": "Tekan untuk sahkan nombor anda",
+        "verify_text": "🇲🇾 Pengguna Malaysia Sahaja\n\nSila sahkan nombor telefon anda untuk teruskan.\n\nTekan butang di bawah dan kongsi contact Telegram anda.",
+        "verify_own_phone": "❌ Sila kongsi nombor Telegram sendiri sahaja.",
+        "verify_already": "✅ Nombor anda sudah disahkan.",
+        "verify_malaysia_only": "❌ Nombor telefon Malaysia sahaja 🇲🇾",
+        "verify_duplicate": "❌ Nombor telefon ini sudah didaftarkan.",
+        "verify_success": "✅ Nombor Malaysia berjaya disahkan.\n\nSelamat datang ke JomJudi88 Rewards 🔥",
+        "verify_busy": "⚠️ Sistem pengesahan sibuk. Sila cuba lagi.",
+        "must_verify": "🇲🇾 Pengguna Malaysia Sahaja\n\nSila tekan /start dan sahkan nombor telefon anda dahulu.",
+        "register": "🔐 Daftar",
+        "earn": "💰 Kumpul Rewards",
+        "gift": "🎁 Free RM38",
+        "checkin": "🎁 Check In",
+        "community": "🌐 Komuniti",
+        "support": "🎧 Support",
+        "back": "🔙 Kembali",
+        "home": "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 𝗥𝗘𝗪𝗔𝗥𝗗𝗦 🔥\n\n💸 Main & collect reward setiap hari\n🎯 Claim points & redeem hadiah\n👑 Unlock VIP rewards\n💰 Touch ’n Go RM100\n\n⚡ Auto Deposit & Withdraw 24/7\n🔐 Support & Privasi Terjamin\n\n👇 Pilih menu di bawah 🚀",
+        "your_rewards_btn": "💎 Rewards Anda",
+        "share_earn_btn": "💰 Share & Earn",
+        "missions_btn": "🎯 Missions",
+        "claim_reward_btn": "🎁 Claim Reward",
+        "menu_text": "💰 Rewards Center\n\n🎁 Complete missions\n🔥 Unlock VIP rewards\n💸 Collect points & claim hadiah setiap hari\n\n💰 Claim Touch'N Go FREE RM100\n\nSyarat untuk claim reward:\n\n• Mesti ada akaun berdaftar di JomJudi88\n• Share referral link ke Facebook / Telegram / kawan-kawan\n  (1 referral = 1 point)\n\n🎁 Ganjaran:\n\n• 3 Point = RM1 Kredit Game\n• 10 Point = RM5 Kredit Game\n• 20 Point = RM10 Kredit Game\n• 50 Point = RM25 Kredit Game\n• 100 Point = RM50 Kredit Game\n• 200 Point = Touch 'n Go RM100\n\n👇 Pilih option di bawah:",
+        "profile_text": "💎 Rewards Anda\n\n⭐️ Reward Points: {points}\n👥 Kawan Dijemput: {invites}\n\n----------------------------------------",
+        "share_caption": "💰 Share & Earn Lagi!\n\nJom ajak kawan join & collect reward sama-sama 🔥\n\n🔗 Link Boss:\n\n{link}",
+        "share_button": "📤 Share Kepada Kawan",
+        "share_text": "Jom join JomJudi88 & collect reward sama-sama 🔥",
+        "reward_center_text": "⏰ Reset setiap hari 12AM Malaysia time\n\n━━━━━━━━━━━━━━\n\n🎁 Lucky Reward\n🔓 Semua boleh claim\n\n⭐️ Random Points:\n+0 • +1\n\n━━━━━━━━━━━━━━\n\n🔥 VIP Reward\n🔒 Unlock 5 invites\n\n⭐️ Better Rewards:\n+0 • +1 • +3\n\n━━━━━━━━━━━━━━\n\n👑 Elite Reward\n🔒 Unlock 20 invites\n\n💎 Big Rewards:\n+0 • +1 • +5",
+        "lucky_reward": "🎁 Lucky Reward",
+        "vip_reward": "🔥 VIP Reward",
+        "elite_reward": "👑 Elite Reward",
+        "missions_text": "🎯 Missions\n\nJom complete mission & collect reward 🔥\n\n✅ Join Channel\n✅ Join Group\n🎁 Claim +2 Points",
+        "join_channel": "📢 Join Channel",
+        "join_group": "👥 Join Group",
+        "done_join": "✅ Done Join",
+        "mission_not_joined": "❌ Sila join Channel & Group dahulu.\n\n⚠️ Kalau sudah join tapi masih tidak boleh claim, pastikan bot sudah jadi admin dalam channel/group.",
+        "claim_reward_text": "🎁 Claim Reward\n\n⭐ Points Anda: {points}\n\n👇 Pilih reward yang tersedia:",
+        "not_enough_btn": "❌ Points belum cukup",
+        "not_enough_text": "❌ Points belum cukup.\n\nInvite kawan dan complete missions untuk kumpul lebih banyak points.",
+        "gift_claimed": "✅ Anda sudah claim hadiah member baru.",
+        "gift_text": "🎁 Hadiah Member Baru\n\n✅ Daftar akaun baru\n✅ Deposit pertama RM20+\n✅ Join Channel & Group dulu 😎\n\n🎁 Reward Free:\nRM38 Kredit Game 💸",
+        "claim_gift_btn": "🎁 Claim Gift",
+        "gift_join_first": "❌ Sila join Channel & Group dahulu sebelum claim Free RM38.\n\n⚠️ Kalau sudah join tapi masih tidak boleh claim, pastikan bot sudah jadi admin dalam channel/group.",
+        "community_text": "🌐 JOMJUDI88 COMMUNITY\n\n📢 Official Updates\n👥 VIP Member Group\n🔞 Exclusive Amoi Content\n\n👇 Pilih di bawah:",
+        "official_channel": "📢 Official Channel",
+        "vip_group": "👥 VIP Group",
+        "amoi_manja": "🔞 Amoi Manja",
+        "support_text": "🟢 JOMJUDI88 SUPPORT\n\n⚡ Fast Response\n🔐 Secure & Private\n🎧 24/7 Live Assistance\n\nTekan link di bawah untuk contact support.\n{url}",
+        "unknown_button": "⚠️ Button tidak dikenali. Sila tekan /start semula.",
+        "system_busy": "⚠️ Sistem sibuk, sila cuba lagi atau tekan /start.",
+        "daily_claimed": "❌ Anda sudah claim reward hari ini.\n\n⏰ Sila datang semula selepas 12AM Malaysia time.",
+        "unlock_invites": "🔒 {title} unlock pada {invites} invites.",
+        "reward_win": "🎉 Reward Berjaya Dibuka!\n\n⭐ +{reward} Points masuk 🔥",
+        "reward_zero": "😆 Belum kena reward kali ni\n\nCuba lagi esok 🔥",
+        "mission_claimed": "✅ Anda sudah claim mission rewards.",
+        "mission_completed": "🎉 Mission Completed!\n\n⭐ +2 Points Added",
+        "redeem_submitted": "⏳ Redeem request sudah dihantar.\n\nAdmin akan review request anda.",
+        "redeem_pending": "⏳ Anda sudah ada pending request untuk reward ini.\n\nSila tunggu admin approval.",
+        "gift_submitted": "⏳ Gift request sudah dihantar.\n\nAdmin akan review request anda.",
+        "gift_pending": "⏳ Anda sudah ada pending gift request.\n\nSila tunggu admin approval.",
+        "approve_user_redeem": "✅ Redeem request anda sudah approved.\n\n🎁 Reward: {reward}",
+        "reject_user_redeem": "❌ Redeem request anda ditolak.\n\n🎁 Reward: {reward}",
+        "approve_user_gift": "✅ Request RM38 Kredit Game anda sudah approved.\n\n💸 RM38 game credit sudah dihantar ke gaming account anda.",
+        "reject_user_gift": "❌ Request hadiah member baru anda ditolak.",
+    },
+    "en": {
+        "language_title": "🌐 Please choose your language\n\n🇲🇾 Bahasa Melayu\n🇬🇧 English\n🇨🇳 中文",
+        "language_saved": "✅ Language selected successfully.",
+        "verify_button": "📱 Verify Malaysia Number",
+        "verify_placeholder": "Tap to verify your number",
+        "verify_text": "🇲🇾 Malaysia Users Only\n\nPlease verify your phone number to continue.\n\nTap the button below and share your Telegram contact.",
+        "verify_own_phone": tr(user_id, "verify_own_phone"),
+        "verify_already": tr(user_id, "verify_already"),
+        "verify_malaysia_only": tr(user_id, "verify_malaysia_only"),
+        "verify_duplicate": tr(user_id, "verify_duplicate"),
+        "verify_success": "✅ Malaysia number verified successfully.\n\nWelcome to JomJudi88 Rewards 🔥",
+        "verify_busy": tr(str(update.effective_user.id), "verify_busy") if update.effective_user else "⚠️ Verification system busy. Please try again.",
+        "must_verify": "🇲🇾 Malaysia Users Only\n\nPlease press /start and verify your phone number first.",
+        "register": "🔐 Register",
+        "earn": "💰 Earn Rewards",
+        "gift": "🎁 Free RM38",
+        "checkin": "🎁 Check In",
+        "community": "🌐 Community",
+        "support": "🎧 Support",
+        "back": "🔙 Back",
+        "home": "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 𝗥𝗘𝗪𝗔𝗥𝗗𝗦 🔥\n\n💸 Play and collect rewards daily\n🎯 Claim points and redeem prizes\n👑 Unlock VIP rewards\n💰 Touch ’n Go RM100\n\n⚡ Auto Deposit & Withdraw 24/7\n🔐 Secure support and privacy\n\n👇 Choose a menu below 🚀",
+        "your_rewards_btn": "💎 Your Rewards",
+        "share_earn_btn": "💰 Share & Earn",
+        "missions_btn": "🎯 Missions",
+        "claim_reward_btn": "🎁 Claim Reward",
+        "menu_text": "💰 Rewards Center\n\n🎁 Complete missions\n🔥 Unlock VIP rewards\n💸 Collect points and claim rewards daily\n\n💰 Claim Touch'N Go FREE RM100\n\nReward claim requirements:\n\n• Must have a registered JomJudi88 account\n• Share your referral link to Facebook / Telegram / friends\n  (1 referral = 1 point)\n\n🎁 Rewards:\n\n• 3 Points = RM1 Game Credit\n• 10 Points = RM5 Game Credit\n• 20 Points = RM10 Game Credit\n• 50 Points = RM25 Game Credit\n• 100 Points = RM50 Game Credit\n• 200 Points = Touch 'n Go RM100\n\n👇 Select an option below:",
+        "profile_text": "💎 Your Rewards\n\n⭐️ Reward Points: {points}\n👥 Friends Referred: {invites}\n\n----------------------------------------",
+        "share_caption": "💰 Share & Earn More!\n\nInvite your friends to join and collect rewards together 🔥\n\n🔗 Your Link:\n\n{link}",
+        "share_button": "📤 Share with Friends",
+        "share_text": "Join JomJudi88 and collect rewards together 🔥",
+        "reward_center_text": "⏰ Resets daily at 12AM Malaysia time\n\n━━━━━━━━━━━━━━\n\n🎁 Lucky Reward\n🔓 Everyone can claim\n\n⭐️ Random Points:\n+0 • +1\n\n━━━━━━━━━━━━━━\n\n🔥 VIP Reward\n🔒 Unlocks at 5 invites\n\n⭐️ Better Rewards:\n+0 • +1 • +3\n\n━━━━━━━━━━━━━━\n\n👑 Elite Reward\n🔒 Unlocks at 20 invites\n\n💎 Big Rewards:\n+0 • +1 • +5",
+        "lucky_reward": "🎁 Lucky Reward",
+        "vip_reward": "🔥 VIP Reward",
+        "elite_reward": "👑 Elite Reward",
+        "missions_text": "🎯 Missions\n\nComplete missions and collect rewards 🔥\n\n✅ Join Channel\n✅ Join Group\n🎁 Claim +2 Points",
+        "join_channel": "📢 Join Channel",
+        "join_group": "👥 Join Group",
+        "done_join": "✅ Done Join",
+        "mission_not_joined": "❌ Please join the Channel & Group first.\n\n⚠️ If you already joined but still cannot claim, make sure the bot is admin in the channel/group.",
+        "claim_reward_text": "🎁 Claim Reward\n\n⭐ Your Points: {points}\n\n👇 Select an available reward:",
+        "not_enough_btn": "❌ Not enough points yet",
+        "not_enough_text": "❌ Not enough points yet.\n\nInvite friends and complete missions to collect more points.",
+        "gift_claimed": "✅ You already claimed the new join gift.",
+        "gift_text": "🎁 New Member Gift\n\n✅ Register a new account\n✅ First deposit RM20+\n✅ Join Channel & Group first 😎\n\n🎁 Free Reward:\nRM38 Game Credit 💸",
+        "claim_gift_btn": "🎁 Claim Gift",
+        "gift_join_first": "❌ Please join Channel & Group first before claiming Free RM38.\n\n⚠️ If you already joined but still cannot claim, make sure the bot is admin in the channel/group.",
+        "community_text": "🌐 JOMJUDI88 COMMUNITY\n\n📢 Official Updates\n👥 VIP Member Group\n🔞 Exclusive Amoi Content\n\n👇 Choose below:",
+        "official_channel": "📢 Official Channel",
+        "vip_group": "👥 VIP Group",
+        "amoi_manja": "🔞 Amoi Manja",
+        "support_text": "🟢 JOMJUDI88 SUPPORT\n\n⚡ Fast Response\n🔐 Secure & Private\n🎧 24/7 Live Assistance\n\nTap the link below to contact support.\n{url}",
+        "unknown_button": "⚠️ Unknown button. Please press /start again.",
+        "system_busy": "⚠️ System busy, please try again or press /start.",
+        "daily_claimed": "❌ You already claimed today's reward.\n\n⏰ Please come back after 12AM Malaysia time.",
+        "unlock_invites": "🔒 {title} unlocks at {invites} invites.",
+        "reward_win": "🎉 Reward Unlocked!\n\n⭐ +{reward} Points added 🔥",
+        "reward_zero": "😆 No reward this time\n\nTry again tomorrow 🔥",
+        "mission_claimed": "✅ You already claimed mission rewards.",
+        "mission_completed": "🎉 Mission Completed!\n\n⭐ +2 Points Added",
+        "redeem_submitted": "⏳ Redeem request submitted.\n\nAdmin will review your request.",
+        "redeem_pending": "⏳ You already have a pending request for this reward.\n\nPlease wait for admin approval.",
+        "gift_submitted": "⏳ Gift request submitted.\n\nAdmin will review your request.",
+        "gift_pending": "⏳ You already have a pending gift request.\n\nPlease wait for admin approval.",
+        "approve_user_redeem": "✅ Your redeem request has been approved.\n\n🎁 Reward: {reward}",
+        "reject_user_redeem": "❌ Your redeem request was rejected.\n\n🎁 Reward: {reward}",
+        "approve_user_gift": tr(target_user, "approve_user_gift"),
+        "reject_user_gift": tr(target_user, "reject_user_gift"),
+    },
+    "zh": {
+        "language_title": "🌐 请选择你的语言\n\n🇲🇾 Bahasa Melayu\n🇬🇧 English\n🇨🇳 中文",
+        "language_saved": "✅ 语言已成功设置。",
+        "verify_button": "📱 验证马来西亚号码",
+        "verify_placeholder": "点击验证你的号码",
+        "verify_text": "🇲🇾 仅限马来西亚用户\n\n请先验证你的电话号码才可继续。\n\n点击下面按钮并分享你的 Telegram 联系方式。",
+        "verify_own_phone": "❌ 请分享你自己的 Telegram 电话号码。",
+        "verify_already": "✅ 你的号码已经验证过了。",
+        "verify_malaysia_only": "❌ 只接受马来西亚电话号码 🇲🇾",
+        "verify_duplicate": "❌ 这个电话号码已经注册过了。",
+        "verify_success": "✅ 马来西亚号码验证成功。\n\n欢迎来到 JomJudi88 Rewards 🔥",
+        "verify_busy": "⚠️ 验证系统繁忙，请再试一次。",
+        "must_verify": "🇲🇾 仅限马来西亚用户\n\n请先按 /start 并验证电话号码。",
+        "register": "🔐 注册",
+        "earn": "💰 赚奖励",
+        "gift": "🎁 免费 RM38",
+        "checkin": "🎁 每日签到",
+        "community": "🌐 社群",
+        "support": "🎧 客服",
+        "back": "🔙 返回",
+        "home": "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 奖励 🔥\n\n💸 每天游戏并领取奖励\n🎯 累积积分兑换礼品\n👑 解锁 VIP 奖励\n💰 Touch ’n Go RM100\n\n⚡ 24/7 自动存款与提款\n🔐 客服与隐私有保障\n\n👇 请选择下面菜单 🚀",
+        "your_rewards_btn": "💎 我的奖励",
+        "share_earn_btn": "💰 分享赚钱",
+        "missions_btn": "🎯 任务",
+        "claim_reward_btn": "🎁 兑换奖励",
+        "menu_text": "💰 奖励中心\n\n🎁 完成任务\n🔥 解锁 VIP 奖励\n💸 每天收集积分并领取奖励\n\n💰 免费兑换 Touch'N Go RM100\n\n兑换奖励条件：\n\n• 必须拥有 JomJudi88 注册账号\n• 分享你的邀请链接到 Facebook / Telegram / 朋友\n  （1 个邀请 = 1 分）\n\n🎁 奖励：\n\n• 3 分 = RM1 游戏信用\n• 10 分 = RM5 游戏信用\n• 20 分 = RM10 游戏信用\n• 50 分 = RM25 游戏信用\n• 100 分 = RM50 游戏信用\n• 200 分 = Touch 'n Go RM100\n\n👇 请选择下面选项：",
+        "profile_text": "💎 我的奖励\n\n⭐️ 奖励积分：{points}\n👥 已邀请朋友：{invites}\n\n----------------------------------------",
+        "share_caption": "💰 分享赚更多！\n\n邀请朋友一起加入并领取奖励 🔥\n\n🔗 你的链接：\n\n{link}",
+        "share_button": "📤 分享给朋友",
+        "share_text": "加入 JomJudi88，一起领取奖励 🔥",
+        "reward_center_text": "⏰ 每天马来西亚时间 12AM 重置\n\n━━━━━━━━━━━━━━\n\n🎁 幸运奖励\n🔓 所有人都能领取\n\n⭐️ 随机积分：\n+0 • +1\n\n━━━━━━━━━━━━━━\n\n🔥 VIP 奖励\n🔒 邀请 5 人解锁\n\n⭐️ 更好奖励：\n+0 • +1 • +3\n\n━━━━━━━━━━━━━━\n\n👑 Elite 奖励\n🔒 邀请 20 人解锁\n\n💎 大奖励：\n+0 • +1 • +5",
+        "lucky_reward": "🎁 幸运奖励",
+        "vip_reward": "🔥 VIP 奖励",
+        "elite_reward": "👑 Elite 奖励",
+        "missions_text": "🎯 任务\n\n完成任务并领取奖励 🔥\n\n✅ 加入频道\n✅ 加入群组\n🎁 领取 +2 积分",
+        "join_channel": "📢 加入频道",
+        "join_group": "👥 加入群组",
+        "done_join": "✅ 已完成加入",
+        "mission_not_joined": "❌ 请先加入 Channel 和 Group。\n\n⚠️ 如果你已经加入但还是不能领取，请确认 bot 已经是 channel/group 的 admin。",
+        "claim_reward_text": "🎁 兑换奖励\n\n⭐ 你的积分：{points}\n\n👇 请选择可兑换奖励：",
+        "not_enough_btn": "❌ 积分还不够",
+        "not_enough_text": "❌ 积分还不够。\n\n邀请朋友并完成任务来赚取更多积分。",
+        "gift_claimed": "✅ 你已经领取过新会员礼物。",
+        "gift_text": "🎁 新会员礼物\n\n✅ 注册新账号\n✅ 首次存款 RM20+\n✅ 先加入 Channel 和 Group 😎\n\n🎁 免费奖励：\nRM38 游戏信用 💸",
+        "claim_gift_btn": "🎁 领取礼物",
+        "gift_join_first": "❌ 请先加入 Channel 和 Group 才能领取免费 RM38。\n\n⚠️ 如果你已经加入但还是不能领取，请确认 bot 已经是 channel/group 的 admin。",
+        "community_text": "🌐 JOMJUDI88 社群\n\n📢 官方更新\n👥 VIP 会员群\n🔞 独家 Amoi 内容\n\n👇 请选择：",
+        "official_channel": "📢 官方频道",
+        "vip_group": "👥 VIP 群组",
+        "amoi_manja": "🔞 Amoi Manja",
+        "support_text": "🟢 JOMJUDI88 客服\n\n⚡ 快速回复\n🔐 安全与隐私\n🎧 24/7 在线协助\n\n点击下面链接联系客服。\n{url}",
+        "unknown_button": "⚠️ 未知按钮，请重新按 /start。",
+        "system_busy": "⚠️ 系统繁忙，请再试一次或按 /start。",
+        "daily_claimed": "❌ 你今天已经领取过奖励。\n\n⏰ 请在马来西亚时间 12AM 后再回来。",
+        "unlock_invites": "🔒 {title} 需要邀请 {invites} 人解锁。",
+        "reward_win": "🎉 奖励已开启！\n\n⭐ +{reward} 积分已加入 🔥",
+        "reward_zero": "😆 这次没有中奖\n\n明天再试 🔥",
+        "mission_claimed": "✅ 你已经领取过任务奖励。",
+        "mission_completed": "🎉 任务完成！\n\n⭐ +2 积分已加入",
+        "redeem_submitted": "⏳ 兑换申请已提交。\n\n管理员将会审核你的申请。",
+        "redeem_pending": "⏳ 你已经有这个奖励的待审核申请。\n\n请等待管理员批准。",
+        "gift_submitted": "⏳ 礼物申请已提交。\n\n管理员将会审核你的申请。",
+        "gift_pending": "⏳ 你已经有待审核的礼物申请。\n\n请等待管理员批准。",
+        "approve_user_redeem": "✅ 你的兑换申请已通过。\n\n🎁 奖励：{reward}",
+        "reject_user_redeem": "❌ 你的兑换申请被拒绝。\n\n🎁 奖励：{reward}",
+        "approve_user_gift": "✅ 你的 RM38 游戏信用申请已通过。\n\n💸 RM38 游戏信用已经发送到你的游戏账号。",
+        "reject_user_gift": "❌ 你的新会员礼物申请被拒绝。",
+    },
+}
+
+
+def lang_of(user_id) -> str:
+    return get_user_language(user_id)
+
+
+def tr(user_id, key, **kwargs):
+    lang = lang_of(user_id)
+    value = TEXT.get(lang, TEXT["ms"]).get(key, TEXT["ms"].get(key, key))
+    try:
+        return value.format(**kwargs)
+    except Exception:
+        return value
+
+
+def tr_lang(lang, key, **kwargs):
+    lang = lang if lang in ["ms", "en", "zh"] else "ms"
+    value = TEXT.get(lang, TEXT["ms"]).get(key, TEXT["ms"].get(key, key))
+    try:
+        return value.format(**kwargs)
+    except Exception:
+        return value
+
+
+def get_language_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇲🇾 Bahasa Melayu", callback_data="lang_ms")],
+        [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
+        [InlineKeyboardButton("🇨🇳 中文", callback_data="lang_zh")],
+    ])
+
+
+def get_language_text():
+    return TEXT["ms"]["language_title"]
+
+
+def get_verify_keyboard(user_id=None):
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(tr(user_id, "verify_button") if user_id else "📱 Verify Malaysia Number", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder=tr(user_id, "verify_placeholder") if user_id else "Tap to verify your number",
+    )
+
+
+def get_main_keyboard(user_id):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔐 Register", url=REGISTER_URL),
-            InlineKeyboardButton("💰 Earn Rewards", callback_data="menu"),
+            InlineKeyboardButton(tr(user_id, "register"), url=REGISTER_URL),
+            InlineKeyboardButton(tr(user_id, "earn"), callback_data="menu"),
         ],
         [
-            InlineKeyboardButton("🎁 Free RM38", callback_data="gift"),
-            InlineKeyboardButton("🎁 Check In", callback_data="reward_center"),
+            InlineKeyboardButton(tr(user_id, "gift"), callback_data="gift"),
+            InlineKeyboardButton(tr(user_id, "checkin"), callback_data="reward_center"),
         ],
         [
-            InlineKeyboardButton("🌐 Community", callback_data="community"),
-            InlineKeyboardButton("🎧 Support", callback_data="support"),
+            InlineKeyboardButton(tr(user_id, "community"), callback_data="community"),
+            InlineKeyboardButton(tr(user_id, "support"), callback_data="support"),
         ],
     ])
 
 
-def get_main_text():
-    return (
-        "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 𝗥𝗘𝗪𝗔𝗥𝗗𝗦 🔥\n\n"
-        "💸 Main & collect reward setiap hari\n"
-        "🎯 Claim points & redeem hadiah\n"
-        "👑 Unlock VIP rewards\n"
-        "💰 Touch ’n Go RM100\n\n"
-        "⚡ Auto Deposit & Withdraw 24/7\n"
-        "🔐 Support & Privasi Terjamin\n\n"
-        "👇 Pilih menu di bawah 🚀"
-    )
+def get_main_text(user_id):
+    return tr(user_id, "home")
 
 
-def kb_back_menu():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="menu")]])
+def kb_back_menu(user_id=None):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(tr(user_id, "back") if user_id else "🔙 Back", callback_data="menu")]])
 
 
-def kb_back_home():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]])
+def kb_back_home(user_id=None):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(tr(user_id, "back") if user_id else "🔙 Back", callback_data="back")]])
 
 
-def kb_back_reward_center():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="reward_center")]])
+def kb_back_reward_center(user_id=None):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(tr(user_id, "back") if user_id else "🔙 Back", callback_data="reward_center")]])
+
 
 def get_share_earn_caption(user_id: str) -> str:
     link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-    return (
-        "💰 Share & Earn Lagi!\n\n"
-        "Jom ajak kawan join & collect reward sama-sama 🔥\n\n"
-        "🔗 Link Boss:\n\n"
-        f"{link}"
-    )
+    return tr(user_id, "share_caption", link=link)
 
 
 def get_share_earn_keyboard(user_id: str):
     link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-    share_text = "Jom join JomJudi88 & collect reward sama-sama 🔥"
-    share_url = f"https://t.me/share/url?url={quote_plus(link)}&text={quote_plus(share_text)}"
+    share_url = f"https://t.me/share/url?url={quote_plus(link)}&text={quote_plus(tr(user_id, 'share_text'))}"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Share Kepada Kawan", url=share_url)],
-        [InlineKeyboardButton("🔙 Back", callback_data="menu")],
+        [InlineKeyboardButton(tr(user_id, "share_button"), url=share_url)],
+        [InlineKeyboardButton(tr(user_id, "back"), callback_data="menu")],
     ])
 
 
@@ -1021,7 +1276,6 @@ async def send_share_earn_page(query, user_id: str):
                 opened_file.close()
             except Exception:
                 pass
-
 
 
 async def safe_send_user(context: ContextTypes.DEFAULT_TYPE, user_id: str, text: str):
@@ -1086,8 +1340,8 @@ async def send_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(
                 chat_id=update.effective_chat.id,
                 photo=HOME_BANNER_FILE_ID,
-                caption=get_main_text(),
-                reply_markup=get_main_keyboard(),
+                caption=get_main_text(update.effective_user.id),
+                reply_markup=get_main_keyboard(update.effective_user.id),
             )
             return
 
@@ -1097,8 +1351,8 @@ async def send_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg = await context.bot.send_photo(
                     chat_id=update.effective_chat.id,
                     photo=photo,
-                    caption=get_main_text(),
-                    reply_markup=get_main_keyboard(),
+                    caption=get_main_text(update.effective_user.id),
+                    reply_markup=get_main_keyboard(update.effective_user.id),
                 )
 
                 # IMPORTANT:
@@ -1118,8 +1372,8 @@ async def send_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # fallback text mode
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=get_main_text(),
-            reply_markup=get_main_keyboard(),
+            text=get_main_text(update.effective_user.id),
+            reply_markup=get_main_keyboard(update.effective_user.id),
         )
 
     except Exception as e:
@@ -1127,24 +1381,23 @@ async def send_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=get_main_text(),
-            reply_markup=get_main_keyboard(),
+            text=get_main_text(update.effective_user.id),
+            reply_markup=get_main_keyboard(update.effective_user.id),
         )
     except Exception as e:
         logger.warning("Banner/send_photo error, fallback send_message: %s", e)
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=get_main_text(),
-            reply_markup=get_main_keyboard(),
+            text=get_main_text(update.effective_user.id),
+            reply_markup=get_main_keyboard(update.effective_user.id),
         )
 
 
 async def request_phone_verification(update: Update):
+    user_id = str(update.effective_user.id) if update.effective_user else None
     await update.effective_message.reply_text(
-        "🇲🇾 Malaysia Users Only\n\n"
-        "Please verify your phone number to continue.\n\n"
-        "Tap the button below and share your Telegram contact.",
-        reply_markup=get_verify_keyboard(),
+        tr(user_id, "verify_text"),
+        reply_markup=get_verify_keyboard(user_id),
     )
 
 
@@ -1170,15 +1423,15 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if contact.user_id and str(contact.user_id) != user_id:
             await update.effective_message.reply_text(
-                "❌ Please share your own Telegram phone number.",
-                reply_markup=get_verify_keyboard(),
+                tr(user_id, "verify_own_phone"),
+                reply_markup=get_verify_keyboard(user_id),
             )
             return
 
         current_user = get_user(user_id)
         if current_user and safe_int(current_user.get("phone_verified", 0)) == 1:
             await update.effective_message.reply_text(
-                "✅ Your number is already verified.",
+                tr(user_id, "verify_already"),
                 reply_markup=ReplyKeyboardRemove(),
             )
             await send_home(update, context)
@@ -1188,8 +1441,8 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not phone.startswith("+60"):
             audit_log(user_id, "phone_verify_rejected", f"phone={phone}")
             await update.effective_message.reply_text(
-                "❌ Malaysia phone number only 🇲🇾",
-                reply_markup=get_verify_keyboard(),
+                tr(user_id, "verify_malaysia_only"),
+                reply_markup=get_verify_keyboard(user_id),
             )
             return
 
@@ -1200,8 +1453,8 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if existing_phone and str(existing_phone.get("user_id")) != user_id:
             audit_log(user_id, "phone_duplicate_rejected", f"phone={phone}")
             await update.effective_message.reply_text(
-                "❌ This phone number is already registered.",
-                reply_markup=get_verify_keyboard(),
+                tr(user_id, "verify_duplicate"),
+                reply_markup=get_verify_keyboard(user_id),
             )
             return
 
@@ -1235,8 +1488,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.warning("Send phone verify notice to admin %s failed: %s", admin, e)
 
         await update.effective_message.reply_text(
-            "✅ Malaysia number verified successfully.\n\n"
-            "Welcome to JomJudi88 Rewards 🔥",
+            tr(user_id, "verify_success"),
             reply_markup=ReplyKeyboardRemove(),
         )
         await send_home(update, context)
@@ -1244,7 +1496,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("CONTACT_HANDLER_ERROR: %s", e)
         try:
-            await update.effective_message.reply_text("⚠️ Verification system busy. Please try again.")
+            await update.effective_message.reply_text(tr(str(update.effective_user.id), "verify_busy") if update.effective_user else "⚠️ Verification system busy. Please try again.")
         except Exception:
             pass
 
@@ -1435,6 +1687,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             create_user(user_id, user_name, existing.get("referrer_id"))
             audit_log(user_id, "start_existing_user", "")
 
+        current_user = get_user(user_id)
+        if not current_user or not current_user.get("language"):
+            await update.effective_message.reply_text(
+                get_language_text(),
+                reply_markup=get_language_keyboard(),
+            )
+            return
+
         if not is_phone_verified(user_id):
             await request_phone_verification(update)
             return
@@ -1483,10 +1743,26 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user = ensure_user(user_id, user_name)
 
+        if data.startswith("lang_"):
+            selected_lang = data.replace("lang_", "", 1)
+            if selected_lang not in ["ms", "en", "zh"]:
+                selected_lang = "ms"
+            set_user_language(user_id, selected_lang)
+            await safe_edit(query, tr_lang(selected_lang, "language_saved"))
+            if not is_phone_verified(user_id):
+                await request_phone_verification(update)
+                return
+            await send_home(update, context)
+            return
+
+        if not is_admin(user_id) and not (user.get("language") or ""):
+            await safe_edit(query, get_language_text(), get_language_keyboard())
+            return
+
         if not is_admin(user_id) and safe_int(user.get("phone_verified", 0)) != 1:
             await safe_reply(
                 query,
-                "🇲🇾 Malaysia Users Only\n\nPlease press /start and verify your phone number first."
+tr(user_id, "must_verify")
             )
             return
 
@@ -1545,118 +1821,59 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data == "menu":
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💎 Your Rewards", callback_data="profile")],
-                [InlineKeyboardButton("💰 Share & Earn", callback_data="link")],
-                [InlineKeyboardButton("🎯 Missions", callback_data="missions")],
-                [InlineKeyboardButton("🎁 Claim Reward", callback_data="redeem_menu")],
-                [InlineKeyboardButton("🔙 Back", callback_data="back")],
+                [InlineKeyboardButton(tr(user_id, "your_rewards_btn"), callback_data="profile")],
+                [InlineKeyboardButton(tr(user_id, "share_earn_btn"), callback_data="link")],
+                [InlineKeyboardButton(tr(user_id, "missions_btn"), callback_data="missions")],
+                [InlineKeyboardButton(tr(user_id, "claim_reward_btn"), callback_data="redeem_menu")],
+                [InlineKeyboardButton(tr(user_id, "back"), callback_data="back")],
             ])
-            await safe_edit(
-                query,
-                "💰 Rewards Center\n\n"
-                "🎁 Complete missions\n"
-                "🔥 Unlock VIP rewards\n"
-                "💸 Collect points & claim hadiah setiap hari\n\n"
-                "💰 Claim Touch'N Go FREE RM100\n\n"
-                "Syarat untuk claim reward:\n\n"
-                "• Mesti ada akaun berdaftar di JomJudi88\n"
-                "• Share referral link ke Facebook / Telegram / kawan-kawan\n"
-                "  (1 referral = 1 point)\n\n"
-                "🎁 Ganjaran:\n\n"
-                "• 3 Point = RM1 Kredit Game\n"
-                "• 10 Point = RM5 Kredit Game\n"
-                "• 20 Point = RM10 Kredit Game\n"
-                "• 50 Point = RM25 Kredit Game\n"
-                "• 100 Point = RM50 Kredit Game\n"
-                "• 200 Point = Touch 'n Go RM100\n\n"
-                "👇 Select an option below:",
-                keyboard,
-            )
+            await safe_edit(query, tr(user_id, "menu_text"), keyboard)
 
         elif data == "profile":
             user = get_user(user_id) or user
-            await safe_edit(
-                query,
-                f"💎 Your Rewards\n\n"
-                f"⭐️ Reward Points: {user.get('points', 0)}\n"
-                f"👥 Friends Referred: {user.get('invited_count', 0)}\n\n"
-                f"----------------------------------------",
-                kb_back_menu(),
-            )
+            await safe_edit(query, tr(user_id, "profile_text", points=user.get("points", 0), invites=user.get("invited_count", 0)), kb_back_menu(user_id))
 
         elif data == "link":
             await send_share_earn_page(query, user_id)
 
         elif data == "reward_center":
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎁 Lucky Reward", callback_data="lucky_reward")],
-                [InlineKeyboardButton("🔥 VIP Reward", callback_data="vip_reward")],
-                [InlineKeyboardButton("👑 Elite Reward", callback_data="elite_reward")],
-                [InlineKeyboardButton("🔙 Back", callback_data="back")],
+                [InlineKeyboardButton(tr(user_id, "lucky_reward"), callback_data="lucky_reward")],
+                [InlineKeyboardButton(tr(user_id, "vip_reward"), callback_data="vip_reward")],
+                [InlineKeyboardButton(tr(user_id, "elite_reward"), callback_data="elite_reward")],
+                [InlineKeyboardButton(tr(user_id, "back"), callback_data="back")],
             ])
-            await safe_edit(
-                query,
-                "⏰ Reset setiap hari 12AM Malaysia time\n\n"
-                "━━━━━━━━━━━━━━\n\n"
-                "🎁 Lucky Reward\n"
-                "🔓 Semua boleh claim\n\n"
-                "⭐️ Random Points:\n"
-                "+0 • +1\n\n"
-                "━━━━━━━━━━━━━━\n\n"
-                "🔥 VIP Reward\n"
-                "🔒 Unlock 5 invites\n\n"
-                "⭐️ Better Rewards:\n"
-                "+0 • +1 • +3\n\n"
-                "━━━━━━━━━━━━━━\n\n"
-                "👑 Elite Reward\n"
-                "🔒 Unlock 20 invites\n\n"
-                "💎 Big Rewards:\n"
-                "+0 • +1 • +5",
-                keyboard,
-            )
+            await safe_edit(query, tr(user_id, "reward_center_text"), keyboard)
 
         elif data == "lucky_reward":
             ok, msg = claim_daily_reward(user_id, "lucky", 0, [(0, 40), (1, 60)])
-            await safe_edit(query, msg, kb_back_reward_center())
+            await safe_edit(query, msg, kb_back_reward_center(user_id))
 
         elif data == "vip_reward":
             ok, msg = claim_daily_reward(user_id, "vip", 5, [(0, 30), (1, 65), (3, 5)])
-            await safe_edit(query, msg, kb_back_reward_center())
+            await safe_edit(query, msg, kb_back_reward_center(user_id))
 
         elif data == "elite_reward":
             ok, msg = claim_daily_reward(user_id, "elite", 20, [(0, 30), (1, 67), (5, 3)])
-            await safe_edit(query, msg, kb_back_reward_center())
+            await safe_edit(query, msg, kb_back_reward_center(user_id))
 
         elif data == "missions":
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)],
-                [InlineKeyboardButton("👥 Join Group", url=GROUP_URL)],
-                [InlineKeyboardButton("✅ Done Join", callback_data="check_missions")],
-                [InlineKeyboardButton("🔙 Back", callback_data="menu")],
+                [InlineKeyboardButton(tr(user_id, "join_channel"), url=CHANNEL_URL)],
+                [InlineKeyboardButton(tr(user_id, "join_group"), url=GROUP_URL)],
+                [InlineKeyboardButton(tr(user_id, "done_join"), callback_data="check_missions")],
+                [InlineKeyboardButton(tr(user_id, "back"), callback_data="menu")],
             ])
-            await safe_edit(
-                query,
-                "🎯 Missions\n\n"
-                "Jom complete mission & collect reward 🔥\n\n"
-                "✅ Join Channel\n"
-                "✅ Join Group\n"
-                "🎁 Claim +2 Points",
-                keyboard,
-            )
+            await safe_edit(query, tr(user_id, "missions_text"), keyboard)
 
         elif data == "check_missions":
             joined_channel = await is_user_joined(CHANNEL_ID, user_id, context)
             joined_group = await is_user_joined(GROUP_ID, user_id, context)
             if joined_channel and joined_group:
                 ok, msg = claim_mission_reward(user_id)
-                await safe_edit(query, msg, kb_back_menu())
+                await safe_edit(query, msg, kb_back_menu(user_id))
             else:
-                await safe_edit(
-                    query,
-                    "❌ Please join Channel & Group first.\n\n"
-                    "⚠️ If you already joined but still cannot claim, make sure the bot is admin in the channel/group.",
-                    kb_back_menu(),
-                )
+                await safe_edit(query, tr(user_id, "mission_not_joined"), kb_back_menu(user_id))
 
         elif data == "redeem_menu":
             user = get_user(user_id) or user
@@ -1674,19 +1891,19 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if points >= pts:
                     keyboard_rows.append([InlineKeyboardButton(f"{reward_text} ({pts} Points)", callback_data=f"redeem:{pts}:{reward_text}")])
             if not keyboard_rows:
-                keyboard_rows.append([InlineKeyboardButton("❌ Not enough points yet", callback_data="not_enough_points")])
-            keyboard_rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu")])
-            await safe_edit(query, f"🎁 Claim Reward\n\n⭐ Your Points: {points}\n\n👇 Select available reward:", InlineKeyboardMarkup(keyboard_rows))
+                keyboard_rows.append([InlineKeyboardButton(tr(user_id, "not_enough_btn"), callback_data="not_enough_points")])
+            keyboard_rows.append([InlineKeyboardButton(tr(user_id, "back"), callback_data="menu")])
+            await safe_edit(query, tr(user_id, "claim_reward_text", points=points), InlineKeyboardMarkup(keyboard_rows))
 
         elif data == "not_enough_points":
-            await safe_edit(query, "❌ Not enough points yet.\n\nInvite friends and complete missions to collect more points.", kb_back_menu())
+            await safe_edit(query, tr(user_id, "not_enough_text"), kb_back_menu(user_id))
 
         elif data.startswith("redeem:"):
             try:
                 _, pts, reward_text = data.split(":", 2)
                 pts = int(pts)
             except Exception:
-                await safe_edit(query, "⚠️ Invalid redeem request.", kb_back_menu())
+                await safe_edit(query, "⚠️ Invalid redeem request.", kb_back_menu(user_id))
                 return
 
             username = query.from_user.username
@@ -1718,7 +1935,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     except Exception as e:
                         logger.warning("Send redeem request to admin %s failed: %s", admin, e)
-            await safe_edit(query, msg, kb_back_menu())
+            await safe_edit(query, msg, kb_back_menu(user_id))
 
         elif data.startswith("approve_redeem:"):
             if not is_admin(user_id):
@@ -1728,7 +1945,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success, message, target_user, reward_text = approve_redeem_request(request_id, user_id)
             await safe_edit(query, message)
             if success and target_user:
-                await safe_send_user(context, target_user, f"✅ Your redeem request has been approved.\n\n🎁 Reward: {reward_text}")
+                await safe_send_user(context, target_user, tr(target_user, "approve_user_redeem", reward=reward_text))
 
         elif data.startswith("reject_redeem:"):
             if not is_admin(user_id):
@@ -1738,39 +1955,25 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success, message, target_user, reward_text = reject_redeem_request(request_id, user_id)
             await safe_edit(query, message)
             if success and target_user:
-                await safe_send_user(context, target_user, f"❌ Your redeem request was rejected.\n\n🎁 Reward: {reward_text}")
+                await safe_send_user(context, target_user, tr(target_user, "reject_user_redeem", reward=reward_text))
 
         elif data == "gift":
             user = get_user(user_id) or user
             if safe_int(user.get("gift_claimed", 0)) == 1 and not is_admin(user_id):
-                await safe_edit(query, "✅ You already claimed the new join gift.", kb_back_home())
+                await safe_edit(query, tr(user_id, "gift_claimed"), kb_back_home(user_id))
                 return
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎁 Claim Gift", callback_data="claim_gift")],
-                [InlineKeyboardButton("🔙 Back", callback_data="back")],
+                [InlineKeyboardButton(tr(user_id, "claim_gift_btn"), callback_data="claim_gift")],
+                [InlineKeyboardButton(tr(user_id, "back"), callback_data="back")],
             ])
-            await safe_edit(
-                query,
-                "🎁 Hadiah Member Baru\n\n"
-                "✅ Daftar akaun baru\n"
-                "✅ Deposit pertama RM20+\n"
-                "✅ Join Channel & Group dulu 😎\n\n"
-                "🎁 Reward Free:\n"
-                "RM38 Kredit Game 💸",
-                keyboard,
-            )
+            await safe_edit(query, tr(user_id, "gift_text"), keyboard)
 
         elif data == "claim_gift":
             joined_channel = await is_user_joined(CHANNEL_ID, user_id, context)
             joined_group = await is_user_joined(GROUP_ID, user_id, context)
 
             if not joined_channel or not joined_group:
-                await safe_edit(
-                    query,
-                    "❌ Please join Channel & Group first before claiming Free RM38.\n\n"
-                    "⚠️ If you already joined but still cannot claim, make sure the bot is admin in the channel/group.",
-                    kb_back_home(),
-                )
+                await safe_edit(query, tr(user_id, "gift_join_first"), kb_back_home(user_id))
                 return
 
             username = query.from_user.username
@@ -1797,7 +2000,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     except Exception as e:
                         logger.warning("Send gift request to admin %s failed: %s", admin, e)
-            await safe_edit(query, msg, kb_back_home())
+            await safe_edit(query, msg, kb_back_home(user_id))
 
         elif data.startswith("approve_gift:"):
             if not is_admin(user_id):
@@ -1810,7 +2013,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_send_user(
                     context,
                     target_user,
-                    "✅ Your RM38 Game Credit request has been approved.\n\n💸 RM38 game credit has been sent to your gaming account."
+                    tr(target_user, "approve_user_gift")
                 )
 
         elif data.startswith("reject_gift:"):
@@ -1821,43 +2024,26 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success, message, target_user = reject_gift_request(target, user_id)
             await safe_edit(query, message)
             if success and target_user:
-                await safe_send_user(context, target_user, "❌ Your new join gift request was rejected.")
+                await safe_send_user(context, target_user, tr(target_user, "reject_user_gift"))
 
         elif data == "community":
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📢 Official Channel", url=CHANNEL_URL)],
-                [InlineKeyboardButton("👥 VIP Group", url=GROUP_URL)],
-                [InlineKeyboardButton("🔞 Amoi Manja", url=AMOI_MANJA_URL)],
-                [InlineKeyboardButton("🔙 Back", callback_data="back")],
+                [InlineKeyboardButton(tr(user_id, "official_channel"), url=CHANNEL_URL)],
+                [InlineKeyboardButton(tr(user_id, "vip_group"), url=GROUP_URL)],
+                [InlineKeyboardButton(tr(user_id, "amoi_manja"), url=AMOI_MANJA_URL)],
+                [InlineKeyboardButton(tr(user_id, "back"), callback_data="back")],
             ])
 
-            await safe_edit(
-                query,
-                "🌐 JOMJUDI88 COMMUNITY\n\n"
-                "📢 Official Updates\n"
-                "👥 VIP Member Group\n"
-                "🔞 Exclusive Amoi Content\n\n"
-                "👇 Choose below:",
-                keyboard,
-            )
+            await safe_edit(query, tr(user_id, "community_text"), keyboard)
 
         elif data == "support":
-            await safe_edit(
-                query,
-                f"🟢 JOMJUDI88 SUPPORT\n\n"
-                f"⚡ Fast Response\n"
-                f"🔐 Secure & Private\n"
-                f"🎧 24/7 Live Assistance\n\n"
-                f"Tap the link below to contact support.\n"
-                f"{SUPPORT_URL}",
-                kb_back_home(),
-            )
+            await safe_edit(query, tr(user_id, "support_text", url=SUPPORT_URL), kb_back_home(user_id))
 
         elif data == "back":
-            await safe_edit(query, get_main_text(), get_main_keyboard())
+            await safe_edit(query, get_main_text(user_id), get_main_keyboard(user_id))
 
         else:
-            await safe_edit(query, "⚠️ Unknown button. Please press /start again.", kb_back_home())
+            await safe_edit(query, tr(user_id, "unknown_button"), kb_back_home(user_id))
 
     except Exception as e:
         logger.exception("BUTTON ERROR user=%s error=%s", user_id, e)
@@ -1866,7 +2052,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         try:
-            await query.message.reply_text("⚠️ System busy, please try again or press /start.")
+            await query.message.reply_text(tr(user_id, "system_busy"))
         except Exception:
             pass
 
