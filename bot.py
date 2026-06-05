@@ -978,9 +978,9 @@ TEXT = {
         "join_group": "👥 Join Group",
         "done_join": "✅ Done Join",
         "mission_not_joined": "❌ Sila join Channel & Group dahulu.\n\n⚠️ Kalau sudah join tapi masih tidak boleh claim, pastikan bot sudah jadi admin dalam channel/group.",
-        "claim_reward_text": "🎁 Claim Reward\n\n⭐ Points Anda: {points}\n\n👇 Pilih reward yang tersedia:",
-        "not_enough_btn": "❌ Points belum cukup",
-        "not_enough_text": "❌ Points belum cukup.\n\nInvite kawan dan complete missions untuk kumpul lebih banyak points.",
+        "claim_reward_text": "🎁 Claim Reward\n\n⭐ Points Anda: {points}\n\n• RM1 Credit → 3 Points\n• RM5 Credit → 10 Points\n• RM10 Credit → 20 Points\n• RM25 Credit → 50 Points\n• RM50 Credit → 100 Points\n• Touch 'n Go RM100 → 200 Points\n\nPilih hadiah di bawah untuk submit redemption.\nSemua hadiah tertakluk kepada admin approval.",
+        "not_enough_btn": "🔒 Points belum cukup",
+        "not_enough_text": "🔒 Points anda belum cukup untuk unlock hadiah ini.\n\nInvite kawan dan complete missions untuk kumpul lebih banyak Points.",
         "gift_claimed": "✅ Anda sudah claim hadiah member baru.",
         "gift_text": "🎁 Hadiah Member Baru\n\n✅ Daftar akaun baru\n✅ Deposit pertama RM20+\n✅ Join Channel & Group dulu 😎\n\n🎁 Reward Free:\nRM38 Kredit Game 💸",
         "claim_gift_btn": "🎁 Claim Gift",
@@ -1047,9 +1047,9 @@ TEXT = {
         "join_group": "👥 Join Group",
         "done_join": "✅ Done Join",
         "mission_not_joined": "❌ Please join the Channel & Group first.\n\n⚠️ If you already joined but still cannot claim, make sure the bot is admin in the channel/group.",
-        "claim_reward_text": "🎁 Claim Reward\n\n⭐ Your Points: {points}\n\n👇 Select an available reward:",
-        "not_enough_btn": "❌ Not enough points yet",
-        "not_enough_text": "❌ Not enough points yet.\n\nInvite friends and complete missions to collect more points.",
+        "claim_reward_text": "🎁 Claim Reward\n\n⭐ Your Points: {points}\n\n• RM1 Credit → 3 Points\n• RM5 Credit → 10 Points\n• RM10 Credit → 20 Points\n• RM25 Credit → 50 Points\n• RM50 Credit → 100 Points\n• Touch 'n Go RM100 → 200 Points\n\nChoose a reward below to submit redemption.\nAll rewards are subject to admin approval.",
+        "not_enough_btn": "🔒 Not enough Points",
+        "not_enough_text": "🔒 You do not have enough Points to unlock this reward yet.\n\nInvite friends and complete missions to collect more Points.",
         "gift_claimed": "✅ You already claimed the new join gift.",
         "gift_text": "🎁 New Member Gift\n\n✅ Register a new account\n✅ First deposit RM20+\n✅ Join Channel & Group first 😎\n\n🎁 Free Reward:\nRM38 Game Credit 💸",
         "claim_gift_btn": "🎁 Claim Gift",
@@ -1116,9 +1116,9 @@ TEXT = {
         "join_group": "👥 加入群组",
         "done_join": "✅ 已完成加入",
         "mission_not_joined": "❌ 请先加入 Channel 和 Group。\n\n⚠️ 如果你已经加入但还是不能领取，请确认 bot 已经是 channel/group 的 admin。",
-        "claim_reward_text": "🎁 兑换奖励\n\n⭐ 你的积分：{points}\n\n👇 请选择可兑换奖励：",
-        "not_enough_btn": "❌ 积分还不够",
-        "not_enough_text": "❌ 积分还不够。\n\n邀请朋友并完成任务来赚取更多积分。",
+        "claim_reward_text": "🎁 兑换奖励\n\n⭐ 你的积分：{points}\n\n• RM1 Credit → 3 Points\n• RM5 Credit → 10 Points\n• RM10 Credit → 20 Points\n• RM25 Credit → 50 Points\n• RM50 Credit → 100 Points\n• Touch 'n Go RM100 → 200 Points\n\n请选择下方奖励提交兑换申请。\n所有奖励需要管理员审核。",
+        "not_enough_btn": "🔒 积分不足",
+        "not_enough_text": "🔒 你的积分还不够，暂时不能解锁这个奖励。\n\n邀请朋友并完成任务来赚取更多积分。",
         "gift_claimed": "✅ 你已经领取过新会员礼物。",
         "gift_text": "🎁 新会员礼物\n\n✅ 注册新账号\n✅ 首次存款 RM20+\n✅ 先加入 Channel 和 Group 😎\n\n🎁 免费奖励：\nRM38 游戏信用 💸",
         "claim_gift_btn": "🎁 领取礼物",
@@ -1898,10 +1898,20 @@ tr(user_id, "must_verify")
                 ("Touch 'n Go RM100", 200),
             ]
             for reward_text, pts in rewards:
-                if points >= pts:
-                    keyboard_rows.append([InlineKeyboardButton(f"{reward_text} ({pts} Points)", callback_data=f"redeem:{pts}:{reward_text}")])
-            if not keyboard_rows:
-                keyboard_rows.append([InlineKeyboardButton(tr(user_id, "not_enough_btn"), callback_data="not_enough_points")])
+                if points >= pts or is_admin(user_id):
+                    keyboard_rows.append([
+                        InlineKeyboardButton(
+                            f"🔓 💰 {reward_text} — {pts} Points",
+                            callback_data=f"redeem:{pts}:{reward_text}",
+                        )
+                    ])
+                else:
+                    keyboard_rows.append([
+                        InlineKeyboardButton(
+                            f"🔒 💰 {reward_text} — {pts} Points",
+                            callback_data="not_enough_points",
+                        )
+                    ])
             keyboard_rows.append([InlineKeyboardButton(tr(user_id, "back"), callback_data="menu")])
             await safe_edit(query, tr(user_id, "claim_reward_text", points=points), InlineKeyboardMarkup(keyboard_rows))
 
