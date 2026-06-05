@@ -363,6 +363,14 @@ def get_user(user_id):
     return db_fetchone("SELECT * FROM users WHERE user_id=%s", (str(user_id),))
 
 
+def get_user_phone(user_id) -> str:
+    try:
+        user = get_user(user_id) or {}
+        return user.get("phone_number") or "Not verified"
+    except Exception:
+        return "Not verified"
+
+
 def set_user_language(user_id, language):
     lang = str(language or "ms").lower()
     if lang not in ["ms", "en", "zh"]:
@@ -1882,6 +1890,7 @@ def format_pending_redeems_for_panel(rows):
         lines.append(
             f"📝 ID: {r.get('id')}\n"
             f"👤 User: {r.get('user_id')} | {r.get('username')}\n"
+            f"📱 Phone: {get_user_phone(r.get('user_id'))}\n"
             f"🎁 Reward: {r.get('reward_text')}\n"
             f"⭐ Points: {r.get('points_needed')}\n"
         )
@@ -1897,6 +1906,7 @@ def format_pending_gifts_for_panel(rows):
         lines.append(
             f"📝 ID: {r.get('id')}\n"
             f"👤 User: {r.get('user_id')} | {r.get('username')}\n"
+            f"📱 Phone: {get_user_phone(r.get('user_id'))}\n"
             f"🕒 {r.get('created_at')}\n"
         )
     return "\n".join(lines)
@@ -1925,6 +1935,7 @@ def format_pending_deposits_for_panel(rows):
         lines.append(
             f"📝 ID: {r.get('id')}\n"
             f"👤 User: {r.get('user_id')} | {r.get('username')}\n"
+            f"📱 Phone: {get_user_phone(r.get('user_id'))}\n"
             f"💰 Deposit: RM{r.get('deposit_amount')}+\n"
             f"⭐ Reward: +{r.get('reward_points')} Points\n"
             f"🕒 {r.get('created_at')}\n"
@@ -2165,6 +2176,7 @@ tr(user_id, "must_verify")
             ok, msg, request_id = create_deposit_mission_request_locked(user_id, username_text, amount, points_reward)
 
             if ok and request_id:
+                phone_text = get_user_phone(user_id)
                 for admin in ADMIN_IDS:
                     admin_keyboard = InlineKeyboardMarkup([
                         [
@@ -2179,6 +2191,7 @@ tr(user_id, "must_verify")
                                 "💰 New Daily Deposit Mission Request\n\n"
                                 f"👤 Username: {username_text}\n"
                                 f"🆔 User ID: {user_id}\n"
+                                f"📱 Phone: {phone_text}\n"
                                 f"💰 Deposit Mission: RM{amount}+\n"
                                 f"⭐ Reward Points: +{points_reward}\n"
                                 f"📝 Request ID: {request_id}\n\n"
@@ -2237,6 +2250,7 @@ tr(user_id, "must_verify")
 
             if ok and request_id:
                 user_latest = get_user(user_id) or user
+                phone_text = user_latest.get("phone_number") or "Not verified"
                 for admin in ADMIN_IDS:
                     admin_keyboard = InlineKeyboardMarkup([
                         [
@@ -2251,6 +2265,7 @@ tr(user_id, "must_verify")
                                 f"🎁 New Redeem Request\n\n"
                                 f"👤 Username: {username_text}\n"
                                 f"🆔 User ID: {user_id}\n"
+                                f"📱 Phone: {phone_text}\n"
                                 f"🎁 Reward: {reward_text}\n"
                                 f"⭐ Points Needed: {pts}\n"
                                 f"⭐ User Current Points: {user_latest.get('points', 0)}\n"
@@ -2325,6 +2340,7 @@ tr(user_id, "must_verify")
             username_text = f"@{username}" if username else "No Username"
             ok, msg, request_id = create_gift_request_locked(user_id, username_text)
             if ok:
+                phone_text = get_user_phone(user_id)
                 for admin in ADMIN_IDS:
                     admin_keyboard = InlineKeyboardMarkup([
                         [
@@ -2339,6 +2355,7 @@ tr(user_id, "must_verify")
                                 f"🎁 New Gift Request\n\n"
                                 f"👤 Username: {username_text}\n"
                                 f"🆔 User ID: {user_id}\n"
+                                f"📱 Phone: {phone_text}\n"
                                 f"📝 Request ID: {request_id}"
                             ),
                             reply_markup=admin_keyboard,
@@ -2470,7 +2487,7 @@ async def pending_redeem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     lines = ["⏳ Pending Redeem Requests\n"]
     for r in rows:
-        lines.append(f"ID: {r.get('id')} | User: {r.get('user_id')} | {r.get('reward_text')} | {r.get('points_needed')} pts | {r.get('username')}")
+        lines.append(f"ID: {r.get('id')} | User: {r.get('user_id')} | Phone: {get_user_phone(r.get('user_id'))} | {r.get('reward_text')} | {r.get('points_needed')} pts | {r.get('username')}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -2484,7 +2501,7 @@ async def pending_deposit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     lines = ["⏳ Pending Deposit Mission Requests\n"]
     for r in rows:
-        lines.append(f"ID: {r.get('id')} | User: {r.get('user_id')} | RM{r.get('deposit_amount')}+ | +{r.get('reward_points')} pts | {r.get('username')} | {r.get('created_at')}")
+        lines.append(f"ID: {r.get('id')} | User: {r.get('user_id')} | Phone: {get_user_phone(r.get('user_id'))} | RM{r.get('deposit_amount')}+ | +{r.get('reward_points')} pts | {r.get('username')} | {r.get('created_at')}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -2497,7 +2514,7 @@ async def pending_gift_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = ["⏳ Pending Gift Requests\n"]
     for r in rows:
-        lines.append(f"ID: {r.get('id')} | User: {r.get('user_id')} | {r.get('username')} | {r.get('created_at')}")
+        lines.append(f"ID: {r.get('id')} | User: {r.get('user_id')} | Phone: {get_user_phone(r.get('user_id'))} | {r.get('username')} | {r.get('created_at')}")
     await update.message.reply_text("\n".join(lines))
 
 
