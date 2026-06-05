@@ -957,6 +957,7 @@ TEXT = {
         "checkin": "🎁 Check In",
         "community": "🌐 Komuniti",
         "support": "🎧 Support",
+        "change_language": "🌐 Tukar Bahasa",
         "back": "🔙 Kembali",
         "home": "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 𝗥𝗘𝗪𝗔𝗥𝗗𝗦 🔥\n\n💸 Main & collect reward setiap hari\n🎯 Claim points & redeem hadiah\n👑 Unlock VIP rewards\n💰 Touch ’n Go RM100\n\n⚡ Auto Deposit & Withdraw 24/7\n🔐 Support & Privasi Terjamin\n\n👇 Pilih menu di bawah 🚀",
         "your_rewards_btn": "💎 Rewards Anda",
@@ -1012,12 +1013,12 @@ TEXT = {
         "verify_button": "📱 Verify Malaysia Number",
         "verify_placeholder": "Tap to verify your number",
         "verify_text": "🇲🇾 Malaysia Users Only\n\nPlease verify your phone number to continue.\n\nTap the button below and share your Telegram contact.",
-        "verify_own_phone": tr(user_id, "verify_own_phone"),
-        "verify_already": tr(user_id, "verify_already"),
-        "verify_malaysia_only": tr(user_id, "verify_malaysia_only"),
-        "verify_duplicate": tr(user_id, "verify_duplicate"),
+        "verify_own_phone": "❌ Please share your own Telegram phone number.",
+        "verify_already": "✅ Your number is already verified.",
+        "verify_malaysia_only": "❌ Malaysia phone number only 🇲🇾",
+        "verify_duplicate": "❌ This phone number is already registered.",
         "verify_success": "✅ Malaysia number verified successfully.\n\nWelcome to JomJudi88 Rewards 🔥",
-        "verify_busy": tr(str(update.effective_user.id), "verify_busy") if update.effective_user else "⚠️ Verification system busy. Please try again.",
+        "verify_busy": "⚠️ Verification system busy. Please try again.",
         "must_verify": "🇲🇾 Malaysia Users Only\n\nPlease press /start and verify your phone number first.",
         "register": "🔐 Register",
         "earn": "💰 Earn Rewards",
@@ -1025,6 +1026,7 @@ TEXT = {
         "checkin": "🎁 Check In",
         "community": "🌐 Community",
         "support": "🎧 Support",
+        "change_language": "🌐 Change Language",
         "back": "🔙 Back",
         "home": "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 𝗥𝗘𝗪𝗔𝗥𝗗𝗦 🔥\n\n💸 Play and collect rewards daily\n🎯 Claim points and redeem prizes\n👑 Unlock VIP rewards\n💰 Touch ’n Go RM100\n\n⚡ Auto Deposit & Withdraw 24/7\n🔐 Secure support and privacy\n\n👇 Choose a menu below 🚀",
         "your_rewards_btn": "💎 Your Rewards",
@@ -1071,8 +1073,8 @@ TEXT = {
         "gift_pending": "⏳ You already have a pending gift request.\n\nPlease wait for admin approval.",
         "approve_user_redeem": "✅ Your redeem request has been approved.\n\n🎁 Reward: {reward}",
         "reject_user_redeem": "❌ Your redeem request was rejected.\n\n🎁 Reward: {reward}",
-        "approve_user_gift": tr(target_user, "approve_user_gift"),
-        "reject_user_gift": tr(target_user, "reject_user_gift"),
+        "approve_user_gift": "✅ Your RM38 Game Credit request has been approved.\n\n💸 RM38 game credit has been sent to your gaming account.",
+        "reject_user_gift": "❌ Your new join gift request was rejected.",
     },
     "zh": {
         "language_title": "🌐 请选择你的语言\n\n🇲🇾 Bahasa Melayu\n🇬🇧 English\n🇨🇳 中文",
@@ -1093,6 +1095,7 @@ TEXT = {
         "checkin": "🎁 每日签到",
         "community": "🌐 社群",
         "support": "🎧 客服",
+        "change_language": "🌐 更换语言",
         "back": "🔙 返回",
         "home": "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 奖励 🔥\n\n💸 每天游戏并领取奖励\n🎯 累积积分兑换礼品\n👑 解锁 VIP 奖励\n💰 Touch ’n Go RM100\n\n⚡ 24/7 自动存款与提款\n🔐 客服与隐私有保障\n\n👇 请选择下面菜单 🚀",
         "your_rewards_btn": "💎 我的奖励",
@@ -1201,6 +1204,9 @@ def get_main_keyboard(user_id):
         [
             InlineKeyboardButton(tr(user_id, "community"), callback_data="community"),
             InlineKeyboardButton(tr(user_id, "support"), callback_data="support"),
+        ],
+        [
+            InlineKeyboardButton(tr(user_id, "change_language"), callback_data="change_language"),
         ],
     ])
 
@@ -1753,6 +1759,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await request_phone_verification(update)
                 return
             await send_home(update, context)
+            return
+
+        if data == "change_language":
+            await safe_edit(query, get_language_text(), get_language_keyboard())
             return
 
         if not is_admin(user_id) and not (user.get("language") or ""):
