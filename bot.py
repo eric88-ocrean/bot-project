@@ -304,6 +304,20 @@ def init_db():
             """)
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS deposit_mission_requests (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT,
+                    username TEXT,
+                    deposit_amount INTEGER,
+                    reward_points INTEGER,
+                    status TEXT DEFAULT 'pending',
+                    created_at TEXT DEFAULT '',
+                    processed_at TEXT DEFAULT '',
+                    processed_by TEXT DEFAULT ''
+                )
+            """)
+
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS audit_logs (
                     id SERIAL PRIMARY KEY,
                     user_id TEXT,
@@ -321,6 +335,8 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_redeem_status ON redeem_requests(status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_gift_user_status ON gift_requests(user_id, status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_gift_status ON gift_requests(status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_deposit_mission_user_status ON deposit_mission_requests(user_id, status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_deposit_mission_status ON deposit_mission_requests(status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id)")
 
         conn.commit()
@@ -533,6 +549,15 @@ def get_pending_redeems(limit=20):
 def get_pending_gifts(limit=20):
     return db_fetchall("""
         SELECT * FROM gift_requests
+        WHERE status='pending'
+        ORDER BY id DESC
+        LIMIT %s
+    """, (int(limit),))
+
+
+def get_pending_deposit_missions(limit=20):
+    return db_fetchall("""
+        SELECT * FROM deposit_mission_requests
         WHERE status='pending'
         ORDER BY id DESC
         LIMIT %s
@@ -822,6 +847,157 @@ def create_gift_request_locked(user_id, username) -> Tuple[bool, str, Optional[i
         put_conn(conn)
 
 
+
+def create_deposit_mission_request_locked(user_id, username, deposit_amount, reward_points) -> Tuple[bool, str, Optional[int]]:
+    """User submits a daily deposit mission for admin review. Points are added only after admin approval."""
+    deposit_amount = safe_int(deposit_amount)
+    reward_points = safe_int(reward_points)
+    if deposit_amount not in [100, 300] or reward_points not in [2, 10]:
+        return False, tr(user_id, "deposit_invalid"), None
+
+    today = today_str()
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
+            user = cur.fetchone()
+            if not user:
+                conn.rollback()
+                return False, "⚠️ User not found. Please press /start again.", None
+
+            # One pending request per user is enough. It prevents spam while admin is reviewing.
+            cur.execute("""
+                SELECT id FROM deposit_mission_requests
+                WHERE user_id=%s AND status='pending'
+                LIMIT 1
+            """, (str(user_id),))
+            pending = cur.fetchone()
+            if pending:
+                conn.rollback()
+                return False, tr(user_id, "deposit_pending"), pending["id"]
+
+            # Do not allow the same tier to be approved more than once per Malaysia day.
+            cur.execute("""
+                SELECT id FROM deposit_mission_requests
+                WHERE user_id=%s AND deposit_amount=%s AND status='approved' AND created_at LIKE %s
+                LIMIT 1
+            """, (str(user_id), deposit_amount, today + "%"))
+            approved_today = cur.fetchone()
+            if approved_today and not is_admin(user_id):
+                conn.rollback()
+                return False, tr(user_id, "deposit_already_claimed"), approved_today["id"]
+
+            cur.execute("""
+                INSERT INTO deposit_mission_requests
+                (user_id, username, deposit_amount, reward_points, status, created_at)
+                VALUES (%s,%s,%s,%s,'pending',%s)
+                RETURNING id
+            """, (str(user_id), username, deposit_amount, reward_points, now_iso()))
+            row = cur.fetchone()
+            request_id = row["id"]
+
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(user_id), "deposit_mission_request", f"deposit=RM{deposit_amount} reward=+{reward_points} id={request_id}", now_iso()),
+            )
+
+        conn.commit()
+        return True, tr(user_id, "deposit_submitted"), request_id
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("create_deposit_mission_request_locked error: %s", e)
+        return False, "⚠️ Deposit mission system busy. Please try again.", None
+    finally:
+        put_conn(conn)
+
+
+def approve_deposit_mission_request(request_id, admin_id) -> Tuple[bool, str, Optional[str], int, int]:
+    conn = None
+    target_user = None
+    deposit_amount = 0
+    reward_points = 0
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM deposit_mission_requests WHERE id=%s FOR UPDATE", (int(request_id),))
+            req = cur.fetchone()
+            if not req:
+                conn.rollback()
+                return False, "❌ Deposit mission request not found.", None, 0, 0
+
+            target_user = req["user_id"]
+            deposit_amount = safe_int(req.get("deposit_amount"))
+            reward_points = safe_int(req.get("reward_points"))
+
+            if req["status"] != "pending":
+                conn.rollback()
+                return False, f"⚠️ This request was already {req['status']}.", target_user, deposit_amount, reward_points
+
+            cur.execute("UPDATE users SET points=points+%s WHERE user_id=%s", (reward_points, str(target_user)))
+            cur.execute("""
+                UPDATE deposit_mission_requests
+                SET status='approved', processed_at=%s, processed_by=%s
+                WHERE id=%s
+            """, (now_iso(), str(admin_id), int(request_id)))
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(admin_id), "approve_deposit_mission", f"request={request_id} target={target_user} RM{deposit_amount} +{reward_points}", now_iso()),
+            )
+        conn.commit()
+        return True, f"✅ Deposit Mission Approved. +{reward_points} points added.", target_user, deposit_amount, reward_points
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("approve_deposit_mission_request error: %s", e)
+        return False, "⚠️ Deposit mission approval failed.", target_user, deposit_amount, reward_points
+    finally:
+        put_conn(conn)
+
+
+def reject_deposit_mission_request(request_id, admin_id) -> Tuple[bool, str, Optional[str], int, int]:
+    conn = None
+    target_user = None
+    deposit_amount = 0
+    reward_points = 0
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM deposit_mission_requests WHERE id=%s FOR UPDATE", (int(request_id),))
+            req = cur.fetchone()
+            if not req:
+                conn.rollback()
+                return False, "❌ Deposit mission request not found.", None, 0, 0
+
+            target_user = req["user_id"]
+            deposit_amount = safe_int(req.get("deposit_amount"))
+            reward_points = safe_int(req.get("reward_points"))
+
+            if req["status"] != "pending":
+                conn.rollback()
+                return False, f"⚠️ This request was already {req['status']}.", target_user, deposit_amount, reward_points
+
+            cur.execute("""
+                UPDATE deposit_mission_requests
+                SET status='rejected', processed_at=%s, processed_by=%s
+                WHERE id=%s
+            """, (now_iso(), str(admin_id), int(request_id)))
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(admin_id), "reject_deposit_mission", f"request={request_id} target={target_user} RM{deposit_amount} +{reward_points}", now_iso()),
+            )
+        conn.commit()
+        return True, "❌ Deposit Mission Rejected.", target_user, deposit_amount, reward_points
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("reject_deposit_mission_request error: %s", e)
+        return False, "⚠️ Deposit mission reject failed.", target_user, deposit_amount, reward_points
+    finally:
+        put_conn(conn)
+
+
 def approve_gift_request(target_user_id, admin_id) -> Tuple[bool, str, Optional[str]]:
     """
     Approve RM38 game credit request
@@ -962,7 +1138,7 @@ TEXT = {
         "home": "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 𝗥𝗘𝗪𝗔𝗥𝗗𝗦 🔥\n\n💸 Main & collect reward setiap hari\n🎯 Claim points & redeem hadiah\n👑 Unlock VIP rewards\n💰 Touch ’n Go RM100\n\n⚡ Auto Deposit & Withdraw 24/7\n🔐 Support & Privasi Terjamin\n\n👇 Pilih menu di bawah 🚀",
         "your_rewards_btn": "💎 Rewards Anda",
         "share_earn_btn": "💰 Share & Earn",
-        "missions_btn": "🎯 Missions",
+        "missions_btn": "💰 Daily Deposit Mission",
         "claim_reward_btn": "🎁 Claim Reward",
         "menu_text": "💰 Rewards Center\n\n🎁 Complete missions\n🔥 Unlock VIP rewards\n💸 Collect points & claim hadiah setiap hari\n\n💰 Claim Touch'N Go FREE RM100\n\nSyarat untuk claim reward:\n\n• Mesti ada akaun berdaftar di JomJudi88\n• Share referral link ke Facebook / Telegram / kawan-kawan\n  (1 referral = 1 point)\n\n🎁 Ganjaran:\n\n• 3 Point = RM1 Kredit Game\n• 10 Point = RM5 Kredit Game\n• 20 Point = RM10 Kredit Game\n• 50 Point = RM25 Kredit Game\n• 100 Point = RM50 Kredit Game\n• 200 Point = Touch 'n Go RM100\n\n👇 Pilih option di bawah:",
         "profile_text": "💎 Rewards Anda\n\n⭐️ Reward Points: {points}\n👥 Kawan Dijemput: {invites}\n\n----------------------------------------",
@@ -973,7 +1149,15 @@ TEXT = {
         "lucky_reward": "🎁 Lucky Reward",
         "vip_reward": "🔥 VIP Reward",
         "elite_reward": "👑 Elite Reward",
-        "missions_text": "🎯 Missions\n\nJom complete mission & collect reward 🔥\n\n✅ Join Channel\n✅ Join Group\n🎁 Claim +2 Points",
+        "missions_text": "💰 Daily Deposit Mission\n\n✅ Deposit RM100+ = +2 Reward Points\n✅ Deposit RM300+ = +10 Reward Points\n\nLepas deposit di website, tekan submit di bawah.\nAdmin akan semak dan approve dahulu sebelum Points masuk.",
+        "submit_deposit_100": "📤 Submit RM100+ Deposit",
+        "submit_deposit_300": "📤 Submit RM300+ Deposit",
+        "deposit_submitted": "⏳ Deposit mission sudah dihantar.\n\nAdmin akan semak deposit anda.",
+        "deposit_pending": "⏳ Anda sudah ada pending deposit mission.\n\nSila tunggu admin approval.",
+        "deposit_already_claimed": "✅ Anda sudah claim mission ini hari ini. Sila cuba lagi esok.",
+        "deposit_invalid": "⚠️ Deposit mission tidak sah.",
+        "deposit_approved_user": "✅ Daily Deposit Mission approved!\n\n💰 Deposit: RM{amount}+\n⭐ +{points} Reward Points sudah masuk.",
+        "deposit_rejected_user": "❌ Daily Deposit Mission anda ditolak.\n\n💰 Deposit: RM{amount}+",
         "join_channel": "📢 Join Channel",
         "join_group": "👥 Join Group",
         "done_join": "✅ Done Join",
@@ -1031,7 +1215,7 @@ TEXT = {
         "home": "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 𝗥𝗘𝗪𝗔𝗥𝗗𝗦 🔥\n\n💸 Play and collect rewards daily\n🎯 Claim points and redeem prizes\n👑 Unlock VIP rewards\n💰 Touch ’n Go RM100\n\n⚡ Auto Deposit & Withdraw 24/7\n🔐 Secure support and privacy\n\n👇 Choose a menu below 🚀",
         "your_rewards_btn": "💎 Your Rewards",
         "share_earn_btn": "💰 Share & Earn",
-        "missions_btn": "🎯 Missions",
+        "missions_btn": "💰 Daily Deposit Mission",
         "claim_reward_btn": "🎁 Claim Reward",
         "menu_text": "💰 Rewards Center\n\n🎁 Complete missions\n🔥 Unlock VIP rewards\n💸 Collect points and claim rewards daily\n\n💰 Claim Touch'N Go FREE RM100\n\nReward claim requirements:\n\n• Must have a registered JomJudi88 account\n• Share your referral link to Facebook / Telegram / friends\n  (1 referral = 1 point)\n\n🎁 Rewards:\n\n• 3 Points = RM1 Game Credit\n• 10 Points = RM5 Game Credit\n• 20 Points = RM10 Game Credit\n• 50 Points = RM25 Game Credit\n• 100 Points = RM50 Game Credit\n• 200 Points = Touch 'n Go RM100\n\n👇 Select an option below:",
         "profile_text": "💎 Your Rewards\n\n⭐️ Reward Points: {points}\n👥 Friends Referred: {invites}\n\n----------------------------------------",
@@ -1042,7 +1226,15 @@ TEXT = {
         "lucky_reward": "🎁 Lucky Reward",
         "vip_reward": "🔥 VIP Reward",
         "elite_reward": "👑 Elite Reward",
-        "missions_text": "🎯 Missions\n\nComplete missions and collect rewards 🔥\n\n✅ Join Channel\n✅ Join Group\n🎁 Claim +2 Points",
+        "missions_text": "💰 Daily Deposit Mission\n\n✅ Deposit RM100+ = +2 Reward Points\n✅ Deposit RM300+ = +10 Reward Points\n\nAfter depositing on the website, submit below.\nAdmin will review and approve before Points are added.",
+        "submit_deposit_100": "📤 Submit RM100+ Deposit",
+        "submit_deposit_300": "📤 Submit RM300+ Deposit",
+        "deposit_submitted": "⏳ Deposit mission submitted.\n\nAdmin will review your deposit.",
+        "deposit_pending": "⏳ You already have a pending deposit mission.\n\nPlease wait for admin approval.",
+        "deposit_already_claimed": "✅ You already claimed this mission today. Please try again tomorrow.",
+        "deposit_invalid": "⚠️ Invalid deposit mission.",
+        "deposit_approved_user": "✅ Daily Deposit Mission approved!\n\n💰 Deposit: RM{amount}+\n⭐ +{points} Reward Points added.",
+        "deposit_rejected_user": "❌ Your Daily Deposit Mission was rejected.\n\n💰 Deposit: RM{amount}+",
         "join_channel": "📢 Join Channel",
         "join_group": "👥 Join Group",
         "done_join": "✅ Done Join",
@@ -1100,7 +1292,7 @@ TEXT = {
         "home": "🎁 𝗝𝗢𝗠𝗝𝗨𝗗𝗜𝟴𝟴 奖励 🔥\n\n💸 每天游戏并领取奖励\n🎯 累积积分兑换礼品\n👑 解锁 VIP 奖励\n💰 Touch ’n Go RM100\n\n⚡ 24/7 自动存款与提款\n🔐 客服与隐私有保障\n\n👇 请选择下面菜单 🚀",
         "your_rewards_btn": "💎 我的奖励",
         "share_earn_btn": "💰 分享赚钱",
-        "missions_btn": "🎯 任务",
+        "missions_btn": "💰 每日充值任务",
         "claim_reward_btn": "🎁 兑换奖励",
         "menu_text": "💰 奖励中心\n\n🎁 完成任务\n🔥 解锁 VIP 奖励\n💸 每天收集积分并领取奖励\n\n💰 免费兑换 Touch'N Go RM100\n\n兑换奖励条件：\n\n• 必须拥有 JomJudi88 注册账号\n• 分享你的邀请链接到 Facebook / Telegram / 朋友\n  （1 个邀请 = 1 分）\n\n🎁 奖励：\n\n• 3 分 = RM1 游戏信用\n• 10 分 = RM5 游戏信用\n• 20 分 = RM10 游戏信用\n• 50 分 = RM25 游戏信用\n• 100 分 = RM50 游戏信用\n• 200 分 = Touch 'n Go RM100\n\n👇 请选择下面选项：",
         "profile_text": "💎 我的奖励\n\n⭐️ 奖励积分：{points}\n👥 已邀请朋友：{invites}\n\n----------------------------------------",
@@ -1111,7 +1303,15 @@ TEXT = {
         "lucky_reward": "🎁 幸运奖励",
         "vip_reward": "🔥 VIP 奖励",
         "elite_reward": "👑 Elite 奖励",
-        "missions_text": "🎯 任务\n\n完成任务并领取奖励 🔥\n\n✅ 加入频道\n✅ 加入群组\n🎁 领取 +2 积分",
+        "missions_text": "💰 每日充值任务\n\n✅ 今日充值 RM100+ = +2 奖励积分\n✅ 今日充值 RM300+ = +10 奖励积分\n\n在网站充值后，点击下面提交审核。\n管理员审核通过后才会加积分。",
+        "submit_deposit_100": "📤 提交 RM100+ 充值",
+        "submit_deposit_300": "📤 提交 RM300+ 充值",
+        "deposit_submitted": "⏳ 充值任务已提交。\n\n管理员将会审核你的充值。",
+        "deposit_pending": "⏳ 你已经有一个待审核的充值任务。\n\n请等待管理员审核。",
+        "deposit_already_claimed": "✅ 你今天已经领取过这个任务，请明天再试。",
+        "deposit_invalid": "⚠️ 无效的充值任务。",
+        "deposit_approved_user": "✅ 每日充值任务审核通过！\n\n💰 充值：RM{amount}+\n⭐ +{points} 奖励积分已加入。",
+        "deposit_rejected_user": "❌ 你的每日充值任务被拒绝。\n\n💰 充值：RM{amount}+",
         "join_channel": "📢 加入频道",
         "join_group": "👥 加入群组",
         "done_join": "✅ 已完成加入",
@@ -1417,14 +1617,8 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(user.id)
         user_name = user.first_name or "User"
 
-        # Prevent spam multiple /start clicks
-        current_time = time.time()
-        last_start = START_LOCK.get(user_id, 0)
-
-        if current_time - last_start < 2:
-            return
-
-        START_LOCK[user_id] = current_time
+        # Contact verification should not use START_LOCK.
+        # Users often tap /start and then immediately share contact.
         ensure_user(user_id, user_name)
 
         if contact.user_id and str(contact.user_id) != user_id:
@@ -1526,6 +1720,9 @@ def get_admin_panel_keyboard():
             InlineKeyboardButton("🎁 Pending Gift", callback_data="admin_gifts"),
         ],
         [
+            InlineKeyboardButton("💰 Pending Deposit", callback_data="admin_deposits"),
+        ],
+        [
             InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast_help"),
             InlineKeyboardButton("💰 Add Points", callback_data="admin_addpoints_help"),
         ],
@@ -1543,6 +1740,7 @@ def get_admin_panel_text():
     stats = get_stats() or {}
     redeem_count = db_fetchone("SELECT COUNT(*) AS c FROM redeem_requests WHERE status='pending'") or {}
     gift_count = db_fetchone("SELECT COUNT(*) AS c FROM gift_requests WHERE status='pending'") or {}
+    deposit_count = db_fetchone("SELECT COUNT(*) AS c FROM deposit_mission_requests WHERE status='pending'") or {}
     verified_count = db_fetchone("SELECT COUNT(*) AS c FROM users WHERE phone_verified=1") or {}
 
     return (
@@ -1552,7 +1750,8 @@ def get_admin_panel_text():
         f"⭐ Total Points: {stats.get('total_points', 0)}\n"
         f"👥 Total Invites: {stats.get('total_invites', 0)}\n"
         f"⏳ Pending Redeem: {redeem_count.get('c', 0)}\n"
-        f"⏳ Pending Gift: {gift_count.get('c', 0)}\n\n"
+        f"⏳ Pending Gift: {gift_count.get('c', 0)}\n"
+        f"⏳ Pending Deposit: {deposit_count.get('c', 0)}\n\n"
         "👇 Choose an admin action below:"
     )
 
@@ -1655,6 +1854,36 @@ def format_pending_gifts_for_panel(rows):
         lines.append(
             f"📝 ID: {r.get('id')}\n"
             f"👤 User: {r.get('user_id')} | {r.get('username')}\n"
+            f"🕒 {r.get('created_at')}\n"
+        )
+    return "\n".join(lines)
+
+
+def get_admin_pending_deposit_markup(rows):
+    buttons = []
+    for r in rows[:10]:
+        rid = r.get("id")
+        amount = r.get("deposit_amount")
+        points = r.get("reward_points")
+        buttons.append([
+            InlineKeyboardButton(f"✅ #{rid} RM{amount}+", callback_data=f"approve_deposit:{rid}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject_deposit:{rid}"),
+        ])
+    buttons.append([InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def format_pending_deposits_for_panel(rows):
+    if not rows:
+        return "💰 Pending Deposit Mission\n\n✅ No pending deposit mission requests."
+
+    lines = ["💰 Pending Deposit Mission Requests\n"]
+    for r in rows[:10]:
+        lines.append(
+            f"📝 ID: {r.get('id')}\n"
+            f"👤 User: {r.get('user_id')} | {r.get('username')}\n"
+            f"💰 Deposit: RM{r.get('deposit_amount')}+\n"
+            f"⭐ Reward: +{r.get('reward_points')} Points\n"
             f"🕒 {r.get('created_at')}\n"
         )
     return "\n".join(lines)
@@ -1804,6 +2033,10 @@ tr(user_id, "must_verify")
                 rows = get_pending_gifts(10)
                 await safe_edit(query, format_pending_gifts_for_panel(rows), get_admin_pending_gift_markup(rows) if rows else kb_admin_back())
 
+            elif data == "admin_deposits":
+                rows = get_pending_deposit_missions(10)
+                await safe_edit(query, format_pending_deposits_for_panel(rows), get_admin_pending_deposit_markup(rows) if rows else kb_admin_back())
+
             elif data == "admin_broadcast_help":
                 await safe_edit(
                     query,
@@ -1869,21 +2102,50 @@ tr(user_id, "must_verify")
 
         elif data == "missions":
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton(tr(user_id, "join_channel"), url=CHANNEL_URL)],
-                [InlineKeyboardButton(tr(user_id, "join_group"), url=GROUP_URL)],
-                [InlineKeyboardButton(tr(user_id, "done_join"), callback_data="check_missions")],
+                [InlineKeyboardButton(tr(user_id, "submit_deposit_100"), callback_data="submit_deposit:100:2")],
+                [InlineKeyboardButton(tr(user_id, "submit_deposit_300"), callback_data="submit_deposit:300:10")],
                 [InlineKeyboardButton(tr(user_id, "back"), callback_data="menu")],
             ])
             await safe_edit(query, tr(user_id, "missions_text"), keyboard)
 
-        elif data == "check_missions":
-            joined_channel = await is_user_joined(CHANNEL_ID, user_id, context)
-            joined_group = await is_user_joined(GROUP_ID, user_id, context)
-            if joined_channel and joined_group:
-                ok, msg = claim_mission_reward(user_id)
-                await safe_edit(query, msg, kb_back_menu(user_id))
-            else:
-                await safe_edit(query, tr(user_id, "mission_not_joined"), kb_back_menu(user_id))
+        elif data.startswith("submit_deposit:"):
+            try:
+                _, amount, points_reward = data.split(":", 2)
+                amount = int(amount)
+                points_reward = int(points_reward)
+            except Exception:
+                await safe_edit(query, tr(user_id, "deposit_invalid"), kb_back_menu(user_id))
+                return
+
+            username = query.from_user.username
+            username_text = f"@{username}" if username else "No Username"
+            ok, msg, request_id = create_deposit_mission_request_locked(user_id, username_text, amount, points_reward)
+
+            if ok and request_id:
+                for admin in ADMIN_IDS:
+                    admin_keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("✅ Approve", callback_data=f"approve_deposit:{request_id}"),
+                            InlineKeyboardButton("❌ Reject", callback_data=f"reject_deposit:{request_id}"),
+                        ]
+                    ])
+                    try:
+                        await context.bot.send_message(
+                            chat_id=int(admin),
+                            text=(
+                                "💰 New Daily Deposit Mission Request\n\n"
+                                f"👤 Username: {username_text}\n"
+                                f"🆔 User ID: {user_id}\n"
+                                f"💰 Deposit Mission: RM{amount}+\n"
+                                f"⭐ Reward Points: +{points_reward}\n"
+                                f"📝 Request ID: {request_id}\n\n"
+                                "Please verify the customer's website deposit before approving."
+                            ),
+                            reply_markup=admin_keyboard,
+                        )
+                    except Exception as e:
+                        logger.warning("Send deposit mission request to admin %s failed: %s", admin, e)
+            await safe_edit(query, msg, kb_back_menu(user_id))
 
         elif data == "redeem_menu":
             user = get_user(user_id) or user
@@ -1976,6 +2238,26 @@ tr(user_id, "must_verify")
             await safe_edit(query, message)
             if success and target_user:
                 await safe_send_user(context, target_user, tr(target_user, "reject_user_redeem", reward=reward_text))
+
+        elif data.startswith("approve_deposit:"):
+            if not is_admin(user_id):
+                await safe_edit(query, "❌ Admin only.")
+                return
+            request_id = int(data.split(":")[1])
+            success, message, target_user, amount, points_reward = approve_deposit_mission_request(request_id, user_id)
+            await safe_edit(query, message)
+            if success and target_user:
+                await safe_send_user(context, target_user, tr(target_user, "deposit_approved_user", amount=amount, points=points_reward))
+
+        elif data.startswith("reject_deposit:"):
+            if not is_admin(user_id):
+                await safe_edit(query, "❌ Admin only.")
+                return
+            request_id = int(data.split(":")[1])
+            success, message, target_user, amount, points_reward = reject_deposit_mission_request(request_id, user_id)
+            await safe_edit(query, message)
+            if success and target_user:
+                await safe_send_user(context, target_user, tr(target_user, "deposit_rejected_user", amount=amount, points=points_reward))
 
         elif data == "gift":
             user = get_user(user_id) or user
@@ -2146,6 +2428,20 @@ async def pending_redeem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     lines = ["⏳ Pending Redeem Requests\n"]
     for r in rows:
         lines.append(f"ID: {r.get('id')} | User: {r.get('user_id')} | {r.get('reward_text')} | {r.get('points_needed')} pts | {r.get('username')}")
+    await update.message.reply_text("\n".join(lines))
+
+
+
+async def pending_deposit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    rows = get_pending_deposit_missions(20)
+    if not rows:
+        await update.message.reply_text("✅ No pending deposit mission requests.")
+        return
+    lines = ["⏳ Pending Deposit Mission Requests\n"]
+    for r in rows:
+        lines.append(f"ID: {r.get('id')} | User: {r.get('user_id')} | RM{r.get('deposit_amount')}+ | +{r.get('reward_points')} pts | {r.get('username')} | {r.get('created_at')}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -2351,6 +2647,7 @@ async def help_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/top_users - invite ranking\n"
         "/pending_redeem - pending redeem list\n"
         "/pending_gift - pending gift list\n"
+        "/pending_deposit - pending deposit mission list\n"
         "/phones - verified Malaysia phone numbers\n"
         "/broadcast MESSAGE - send message to all users\n"
         "/addpoints USER_ID POINTS - add points\n"
@@ -2385,6 +2682,7 @@ def build_app():
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("pending_redeem", pending_redeem_cmd))
     app.add_handler(CommandHandler("pending_gift", pending_gift_cmd))
+    app.add_handler(CommandHandler("pending_deposit", pending_deposit_cmd))
     app.add_handler(CommandHandler("phones", phones_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("addpoints", addpoints_cmd))
