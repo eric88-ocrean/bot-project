@@ -17,7 +17,7 @@ import os
 import random
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple
 from urllib.parse import quote_plus
@@ -238,6 +238,8 @@ def init_db():
                     last_vip_claim TEXT DEFAULT '',
                     last_elite_claim TEXT DEFAULT '',
                     checkin_streak INTEGER DEFAULT 0,
+                    last_checkin_at TEXT DEFAULT '',
+                    last_checkin_reminder_at TEXT DEFAULT '',
                     phone_number TEXT DEFAULT '',
                     phone_verified INTEGER DEFAULT 0,
                     phone_verified_at TEXT DEFAULT '',
@@ -259,6 +261,8 @@ def init_db():
                 "last_vip_claim TEXT DEFAULT ''",
                 "last_elite_claim TEXT DEFAULT ''",
                 "checkin_streak INTEGER DEFAULT 0",
+                "last_checkin_at TEXT DEFAULT ''",
+                "last_checkin_reminder_at TEXT DEFAULT ''",
                 "phone_number TEXT DEFAULT ''",
                 "phone_verified INTEGER DEFAULT 0",
                 "phone_verified_at TEXT DEFAULT ''",
@@ -427,8 +431,8 @@ def create_user(user_id, name, referrer_id=None):
         INSERT INTO users
         (user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id,
          mission_claimed, last_lucky_claim, last_vip_claim, last_elite_claim,
-         checkin_streak, last_seen_at, created_at)
-        VALUES (%s,%s,0,0,0,0,%s,0,'','','',0,%s,%s)
+         checkin_streak, last_checkin_at, last_checkin_reminder_at, last_seen_at, created_at)
+        VALUES (%s,%s,0,0,0,0,%s,0,'','','',0,'','',%s,%s)
         ON CONFLICT (user_id) DO UPDATE SET
             name = EXCLUDED.name,
             last_seen_at = EXCLUDED.last_seen_at
@@ -528,9 +532,27 @@ def get_top_invites():
 
 def get_all_users():
     return db_fetchall("""
-        SELECT user_id, name, points, invited_count, phone_number, phone_verified
-        FROM users
-        ORDER BY invited_count DESC, points DESC
+        SELECT
+            u.user_id,
+            u.name,
+            u.points,
+            u.invited_count,
+            u.phone_number,
+            u.phone_verified,
+            COALESCE(u.checkin_streak, 0) AS checkin_streak,
+            COALESCE(u.last_checkin_at, '') AS last_checkin_at,
+            COALESCE(dm.rm100_count, 0) AS rm100_count,
+            COALESCE(dm.rm300_count, 0) AS rm300_count
+        FROM users u
+        LEFT JOIN (
+            SELECT
+                user_id,
+                SUM(CASE WHEN deposit_amount=100 AND status='approved' THEN 1 ELSE 0 END) AS rm100_count,
+                SUM(CASE WHEN deposit_amount=300 AND status='approved' THEN 1 ELSE 0 END) AS rm300_count
+            FROM deposit_mission_requests
+            GROUP BY user_id
+        ) dm ON dm.user_id = u.user_id
+        ORDER BY u.invited_count DESC, u.points DESC
     """)
 
 
@@ -570,6 +592,61 @@ def get_pending_deposit_missions(limit=20):
         ORDER BY id DESC
         LIMIT %s
     """, (int(limit),))
+
+
+def update_user_checkin_after_claim(cur, user):
+    """Update check-in streak when a daily reward is successfully claimed."""
+    today = today_str()
+    yesterday = (now_my() - timedelta(days=1)).strftime("%Y-%m-%d")
+    last_checkin = (user.get("last_checkin_at") or "")[:10]
+
+    if last_checkin == today:
+        new_streak = safe_int(user.get("checkin_streak", 0))
+    elif last_checkin == yesterday:
+        new_streak = safe_int(user.get("checkin_streak", 0)) + 1
+    else:
+        new_streak = 1
+
+    cur.execute(
+        """
+        UPDATE users
+        SET checkin_streak=%s,
+            last_checkin_at=%s
+        WHERE user_id=%s
+        """,
+        (new_streak, now_iso(), str(user.get("user_id"))),
+    )
+    return new_streak
+
+
+def get_users_for_checkin_reminder():
+    today = today_str()
+    cutoff = (now_my() - timedelta(days=2)).strftime("%Y-%m-%d")
+    return db_fetchall("""
+        SELECT user_id, name, language, last_checkin_at, last_checkin_reminder_at
+        FROM users
+        WHERE phone_verified=1
+          AND COALESCE(last_checkin_reminder_at, '') NOT LIKE %s
+          AND (
+                (COALESCE(last_checkin_at, '') = '' AND LEFT(COALESCE(created_at, ''), 10) <= %s)
+             OR (COALESCE(last_checkin_at, '') <> '' AND LEFT(last_checkin_at, 10) <= %s)
+          )
+        ORDER BY last_checkin_at ASC
+        LIMIT 500
+    """, (today + "%", cutoff, cutoff))
+
+
+def mark_checkin_reminder_sent(user_id):
+    db_execute("UPDATE users SET last_checkin_reminder_at=%s WHERE user_id=%s", (now_iso(), str(user_id)))
+
+
+def checkin_reminder_text(lang):
+    lang = lang if lang in ["ms", "en", "zh"] else "ms"
+    if lang == "zh":
+        return "🎁 Boss，你已经 2 天没有 Check In 了。\n\n现在回来继续签到，收集 Reward Points 🔥"
+    if lang == "en":
+        return "🎁 Boss, you have not checked in for 2 days.\n\nCome back now and continue collecting Reward Points 🔥"
+    return "🎁 Boss, anda sudah 2 hari belum Check In.\n\nJom sambung check in dan kumpul Reward Points 🔥"
 
 
 # ================= TRANSACTION FLOWS =================
@@ -620,9 +697,11 @@ def claim_daily_reward(user_id: str, reward_type: str, min_invites: int, reward_
                 (today, int(reward), str(user_id)),
             )
 
+            new_streak = update_user_checkin_after_claim(cur, user)
+
             cur.execute(
                 "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(user_id), f"claim_{reward_type}", f"reward={reward}", now_iso()),
+                (str(user_id), f"claim_{reward_type}", f"reward={reward}; checkin_streak={new_streak}", now_iso()),
             )
 
         conn.commit()
@@ -1819,6 +1898,8 @@ def format_admin_users(limit=30):
             f"{i}. {row.get('name') or 'User'}\n"
             f"ID: {row.get('user_id')}\n"
             f"⭐ {row.get('points', 0)} points | 👥 {row.get('invited_count', 0)} invites\n"
+            f"💰 RM100: {row.get('rm100_count', 0)}x | RM300: {row.get('rm300_count', 0)}x\n"
+            f"🎁 Check-in: {row.get('checkin_streak', 0)} days | Last: {(row.get('last_checkin_at') or '-')[:10]}\n"
             f"📱 {row.get('phone_number') or 'Not verified'} {verified}\n"
         )
     return "\n".join(lines)
@@ -2433,6 +2514,8 @@ async def all_users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"ID: {row.get('user_id')}\n"
                 f"⭐ {row.get('points', 0)} points\n"
                 f"👥 {row.get('invited_count', 0)} invites\n"
+                f"💰 RM100: {row.get('rm100_count', 0)}x | RM300: {row.get('rm300_count', 0)}x\n"
+                f"🎁 Check-in: {row.get('checkin_streak', 0)} days | Last: {(row.get('last_checkin_at') or '-')[:10]}\n"
                 f"📱 {row.get('phone_number') or 'Not verified'}\n"
             )
         text = "\n".join(lines)
@@ -2716,6 +2799,30 @@ async def help_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def checkin_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        rows = get_users_for_checkin_reminder()
+        if not rows:
+            return
+
+        for row in rows:
+            user_id = str(row.get("user_id"))
+            try:
+                await context.bot.send_message(
+                    chat_id=int(user_id),
+                    text=checkin_reminder_text(row.get("language") or "ms"),
+                )
+                mark_checkin_reminder_sent(user_id)
+                audit_log(user_id, "checkin_reminder_sent", "2_days_no_checkin")
+            except Forbidden:
+                mark_checkin_reminder_sent(user_id)
+                logger.warning("Check-in reminder skipped; bot blocked by user %s", user_id)
+            except Exception as e:
+                logger.warning("Check-in reminder failed user=%s error=%s", user_id, e)
+    except Exception as e:
+        logger.exception("checkin_reminder_job error: %s", e)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled Telegram error: %s", context.error)
 
@@ -2751,6 +2858,18 @@ def build_app():
     app.add_handler(CommandHandler("resetreward", resetreward_cmd))
     app.add_handler(CallbackQueryHandler(button))
     app.add_error_handler(error_handler)
+
+    # Daily automatic reminder for users who have not checked in for 2 days.
+    # Runs every day at 12:00 PM Malaysia time.
+    if app.job_queue:
+        app.job_queue.run_daily(
+            checkin_reminder_job,
+            time=dt_time(hour=12, minute=0, second=0, tzinfo=TZ),
+            name="daily_checkin_reminder",
+        )
+    else:
+        logger.warning("JobQueue is not available. Install python-telegram-bot[job-queue] to enable auto reminders.")
+
     return app
 
 
