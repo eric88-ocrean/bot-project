@@ -60,6 +60,7 @@ GROUP_ID = os.getenv("GROUP_ID", "@jomjudi88official")
 CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/jomjudi88cuci")
 GROUP_URL = os.getenv("GROUP_URL", "https://t.me/jomjudi88official")
 REGISTER_URL = os.getenv("REGISTER_URL", "https://jomjudi88.live/my/register/?referral=JJ27817922")
+JOM_REWARDS_URL = os.getenv("JOM_REWARDS_URL", "https://jom-rewards.atoms.world/")
 AMOI_MANJA_URL = os.getenv("AMOI_MANJA_URL", "https://t.me/JomJManja_bot")
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/JomJudi88vip")
 HOME_BANNER_FILE_ID = os.getenv("HOME_BANNER_FILE_ID", "").strip()
@@ -939,7 +940,7 @@ def create_deposit_mission_request_locked(user_id, username, deposit_amount, rew
     """User submits a daily deposit mission for admin review. Points are added only after admin approval."""
     deposit_amount = safe_int(deposit_amount)
     reward_points = safe_int(reward_points)
-    if deposit_amount not in [100, 300] or reward_points not in [2, 10]:
+    if deposit_amount not in [100, 300] or reward_points not in [2, 5]:
         return False, tr(user_id, "deposit_invalid"), None
 
     today = today_str()
@@ -1227,6 +1228,7 @@ TEXT = {
         "your_rewards_btn": "💎 Rewards Anda",
         "share_earn_btn": "💰 Share & Earn",
         "missions_btn": "💰 Daily Deposit Mission",
+        "jom_rewards_btn": "🌐 JOM Rewards",
         "claim_reward_btn": "🎁 Claim Reward",
         "menu_text": "💰 Rewards Center\n\n🎁 Complete missions\n🔥 Unlock VIP rewards\n💸 Collect points & claim hadiah setiap hari\n\n💰 Claim Touch'N Go FREE RM100\n\nSyarat untuk claim reward:\n\n• Mesti ada akaun berdaftar di JomJudi88\n• Share referral link ke Facebook / Telegram / kawan-kawan\n  (1 referral = 1 point)\n\n🎁 Ganjaran:\n\n• 3 Point = RM1 Kredit Game\n• 10 Point = RM5 Kredit Game\n• 20 Point = RM10 Kredit Game\n• 50 Point = RM25 Kredit Game\n• 100 Point = RM50 Kredit Game\n• 200 Point = Touch 'n Go RM100\n\n👇 Pilih option di bawah:",
         "profile_text": "💎 Rewards Anda\n\n⭐️ Reward Points: {points}\n👥 Kawan Dijemput: {invites}\n\n----------------------------------------",
@@ -1237,7 +1239,7 @@ TEXT = {
         "lucky_reward": "🎁 Lucky Reward",
         "vip_reward": "🔥 VIP Reward",
         "elite_reward": "👑 Elite Reward",
-        "missions_text": "💰 Daily Deposit Mission\n\n✅ Deposit RM100+ = +2 Reward Points\n✅ Deposit RM300+ = +10 Reward Points\n\nLepas deposit di website, tekan submit di bawah.\nAdmin akan semak dan approve dahulu sebelum Points masuk.",
+        "missions_text": "💰 Daily Deposit Mission\n\n✅ Deposit RM100+ = +2 Reward Points\n✅ Deposit RM300+ = +5 Reward Points\n\nLepas deposit di website, tekan submit di bawah.\nAdmin akan semak dan approve dahulu sebelum Points masuk.",
         "submit_deposit_100": "📤 Submit RM100+ Deposit",
         "submit_deposit_300": "📤 Submit RM300+ Deposit",
         "deposit_submitted": "⏳ Deposit mission sudah dihantar.\n\nAdmin akan semak deposit anda.",
@@ -1305,6 +1307,7 @@ TEXT = {
         "your_rewards_btn": "💎 Your Rewards",
         "share_earn_btn": "💰 Share & Earn",
         "missions_btn": "💰 Daily Deposit Mission",
+        "jom_rewards_btn": "🌐 JOM Rewards",
         "claim_reward_btn": "🎁 Claim Reward",
         "menu_text": "💰 Rewards Center\n\n🎁 Complete missions\n🔥 Unlock VIP rewards\n💸 Collect points and claim rewards daily\n\n💰 Claim Touch'N Go FREE RM100\n\nReward claim requirements:\n\n• Must have a registered JomJudi88 account\n• Share your referral link to Facebook / Telegram / friends\n  (1 referral = 1 point)\n\n🎁 Rewards:\n\n• 3 Points = RM1 Game Credit\n• 10 Points = RM5 Game Credit\n• 20 Points = RM10 Game Credit\n• 50 Points = RM25 Game Credit\n• 100 Points = RM50 Game Credit\n• 200 Points = Touch 'n Go RM100\n\n👇 Select an option below:",
         "profile_text": "💎 Your Rewards\n\n⭐️ Reward Points: {points}\n👥 Friends Referred: {invites}\n\n----------------------------------------",
@@ -1315,7 +1318,7 @@ TEXT = {
         "lucky_reward": "🎁 Lucky Reward",
         "vip_reward": "🔥 VIP Reward",
         "elite_reward": "👑 Elite Reward",
-        "missions_text": "💰 Daily Deposit Mission\n\n✅ Deposit RM100+ = +2 Reward Points\n✅ Deposit RM300+ = +10 Reward Points\n\nAfter depositing on the website, submit below.\nAdmin will review and approve before Points are added.",
+        "missions_text": "💰 Daily Deposit Mission\n\n✅ Deposit RM100+ = +2 Reward Points\n✅ Deposit RM300+ = +5 Reward Points\n\nAfter depositing on the website, submit below.\nAdmin will review and approve before Points are added.",
         "submit_deposit_100": "📤 Submit RM100+ Deposit",
         "submit_deposit_300": "📤 Submit RM300+ Deposit",
         "deposit_submitted": "⏳ Deposit mission submitted.\n\nAdmin will review your deposit.",
@@ -1383,6 +1386,7 @@ TEXT = {
         "your_rewards_btn": "💎 我的奖励",
         "share_earn_btn": "💰 分享赚钱",
         "missions_btn": "💰 每日充值任务",
+        "jom_rewards_btn": "🌐 JOM Rewards",
         "claim_reward_btn": "🎁 兑换奖励",
         "menu_text": "💰 奖励中心\n\n🎁 完成任务\n🔥 解锁 VIP 奖励\n💸 每天收集积分并领取奖励\n\n💰 免费兑换 Touch'N Go RM100\n\n兑换奖励条件：\n\n• 必须拥有 JomJudi88 注册账号\n• 分享你的邀请链接到 Facebook / Telegram / 朋友\n  （1 个邀请 = 1 分）\n\n🎁 奖励：\n\n• 3 分 = RM1 游戏信用\n• 10 分 = RM5 游戏信用\n• 20 分 = RM10 游戏信用\n• 50 分 = RM25 游戏信用\n• 100 分 = RM50 游戏信用\n• 200 分 = Touch 'n Go RM100\n\n👇 请选择下面选项：",
         "profile_text": "💎 我的奖励\n\n⭐️ 奖励积分：{points}\n👥 已邀请朋友：{invites}\n\n----------------------------------------",
@@ -1393,7 +1397,7 @@ TEXT = {
         "lucky_reward": "🎁 幸运奖励",
         "vip_reward": "🔥 VIP 奖励",
         "elite_reward": "👑 Elite 奖励",
-        "missions_text": "💰 每日充值任务\n\n✅ 今日充值 RM100+ = +2 奖励积分\n✅ 今日充值 RM300+ = +10 奖励积分\n\n在网站充值后，点击下面提交审核。\n管理员审核通过后才会加积分。",
+        "missions_text": "💰 每日充值任务\n\n✅ 今日充值 RM100+ = +2 奖励积分\n✅ 今日充值 RM300+ = +5 奖励积分\n\n在网站充值后，点击下面提交审核。\n管理员审核通过后才会加积分。",
         "submit_deposit_100": "📤 提交 RM100+ 充值",
         "submit_deposit_300": "📤 提交 RM300+ 充值",
         "deposit_submitted": "⏳ 充值任务已提交。\n\n管理员将会审核你的充值。",
@@ -2202,6 +2206,7 @@ tr(user_id, "must_verify")
                 [InlineKeyboardButton(tr(user_id, "your_rewards_btn"), callback_data="profile")],
                 [InlineKeyboardButton(tr(user_id, "share_earn_btn"), callback_data="link")],
                 [InlineKeyboardButton(tr(user_id, "missions_btn"), callback_data="missions")],
+                [InlineKeyboardButton(tr(user_id, "jom_rewards_btn"), url=JOM_REWARDS_URL)],
                 [InlineKeyboardButton(tr(user_id, "claim_reward_btn"), callback_data="redeem_menu")],
                 [InlineKeyboardButton(tr(user_id, "back"), callback_data="back")],
             ])
@@ -2238,7 +2243,7 @@ tr(user_id, "must_verify")
         elif data == "missions":
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton(tr(user_id, "submit_deposit_100"), callback_data="submit_deposit:100:2")],
-                [InlineKeyboardButton(tr(user_id, "submit_deposit_300"), callback_data="submit_deposit:300:10")],
+                [InlineKeyboardButton(tr(user_id, "submit_deposit_300"), callback_data="submit_deposit:300:5")],
                 [InlineKeyboardButton(tr(user_id, "back"), callback_data="menu")],
             ])
             await safe_edit(query, tr(user_id, "missions_text"), keyboard)
