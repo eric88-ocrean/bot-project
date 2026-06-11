@@ -17,6 +17,7 @@ import os
 import random
 import logging
 import time
+import asyncio
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple
@@ -82,6 +83,18 @@ DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "8"))
 # Anti-spam settings.
 CALLBACK_COOLDOWN_SECONDS = float(os.getenv("CALLBACK_COOLDOWN_SECONDS", "0.8"))
 ADMIN_COOLDOWN_SECONDS = float(os.getenv("ADMIN_COOLDOWN_SECONDS", "0.2"))
+
+# Gentle automatic push reminder settings.
+# Designed to avoid spam:
+# - Check-in reminder: max once every 3 days per user.
+# - Share & Earn reminder: max once every 7 days per user.
+# - Each run has a send limit to avoid Telegram rate limits.
+CHECKIN_PUSH_ENABLED = os.getenv("CHECKIN_PUSH_ENABLED", "true").lower() == "true"
+SHARE_PUSH_ENABLED = os.getenv("SHARE_PUSH_ENABLED", "true").lower() == "true"
+CHECKIN_PUSH_COOLDOWN_DAYS = int(os.getenv("CHECKIN_PUSH_COOLDOWN_DAYS", "3"))
+SHARE_PUSH_COOLDOWN_DAYS = int(os.getenv("SHARE_PUSH_COOLDOWN_DAYS", "7"))
+PUSH_MAX_PER_RUN = int(os.getenv("PUSH_MAX_PER_RUN", "120"))
+PUSH_SLEEP_SECONDS = float(os.getenv("PUSH_SLEEP_SECONDS", "0.15"))
 
 
 # ================= LOGGING =================
@@ -241,6 +254,8 @@ def init_db():
                     checkin_streak INTEGER DEFAULT 0,
                     last_checkin_at TEXT DEFAULT '',
                     last_checkin_reminder_at TEXT DEFAULT '',
+                    last_checkin_push_at TEXT DEFAULT '',
+                    last_share_push_at TEXT DEFAULT '',
                     phone_number TEXT DEFAULT '',
                     phone_verified INTEGER DEFAULT 0,
                     phone_verified_at TEXT DEFAULT '',
@@ -264,6 +279,8 @@ def init_db():
                 "checkin_streak INTEGER DEFAULT 0",
                 "last_checkin_at TEXT DEFAULT ''",
                 "last_checkin_reminder_at TEXT DEFAULT ''",
+                "last_checkin_push_at TEXT DEFAULT ''",
+                "last_share_push_at TEXT DEFAULT ''",
                 "phone_number TEXT DEFAULT ''",
                 "phone_verified INTEGER DEFAULT 0",
                 "phone_verified_at TEXT DEFAULT ''",
@@ -621,33 +638,105 @@ def update_user_checkin_after_claim(cur, user):
 
 
 def get_users_for_checkin_reminder():
+    """Users who have not checked in recently. Gentle push: max once every few days."""
     today = today_str()
-    cutoff = (now_my() - timedelta(days=2)).strftime("%Y-%m-%d")
+    inactive_cutoff = (now_my() - timedelta(days=2)).strftime("%Y-%m-%d")
+    push_cutoff = (now_my() - timedelta(days=CHECKIN_PUSH_COOLDOWN_DAYS)).isoformat(timespec="seconds")
+
     return db_fetchall("""
-        SELECT user_id, name, language, last_checkin_at, last_checkin_reminder_at
+        SELECT user_id, name, language, last_checkin_at, last_checkin_push_at
         FROM users
         WHERE phone_verified=1
-          AND COALESCE(last_checkin_reminder_at, '') NOT LIKE %s
+          AND (
+                COALESCE(last_checkin_push_at, '') = ''
+             OR last_checkin_push_at <= %s
+          )
           AND (
                 (COALESCE(last_checkin_at, '') = '' AND LEFT(COALESCE(created_at, ''), 10) <= %s)
              OR (COALESCE(last_checkin_at, '') <> '' AND LEFT(last_checkin_at, 10) <= %s)
           )
-        ORDER BY last_checkin_at ASC
-        LIMIT 500
-    """, (today + "%", cutoff, cutoff))
+        ORDER BY COALESCE(last_checkin_push_at, '') ASC, last_checkin_at ASC
+        LIMIT %s
+    """, (push_cutoff, inactive_cutoff, inactive_cutoff, PUSH_MAX_PER_RUN))
+
+
+def get_users_for_share_reminder():
+    """Users who can benefit from Share & Earn reminder. Gentle push: max once a week."""
+    push_cutoff = (now_my() - timedelta(days=SHARE_PUSH_COOLDOWN_DAYS)).isoformat(timespec="seconds")
+    created_cutoff = (now_my() - timedelta(days=2)).strftime("%Y-%m-%d")
+
+    return db_fetchall("""
+        SELECT user_id, name, language, invited_count, last_share_push_at
+        FROM users
+        WHERE phone_verified=1
+          AND LEFT(COALESCE(created_at, ''), 10) <= %s
+          AND COALESCE(invited_count, 0) < 20
+          AND (
+                COALESCE(last_share_push_at, '') = ''
+             OR last_share_push_at <= %s
+          )
+        ORDER BY COALESCE(last_share_push_at, '') ASC, invited_count ASC
+        LIMIT %s
+    """, (created_cutoff, push_cutoff, PUSH_MAX_PER_RUN))
 
 
 def mark_checkin_reminder_sent(user_id):
-    db_execute("UPDATE users SET last_checkin_reminder_at=%s WHERE user_id=%s", (now_iso(), str(user_id)))
+    # Keep old column updated for compatibility, and use the new dedicated push column.
+    db_execute(
+        "UPDATE users SET last_checkin_reminder_at=%s, last_checkin_push_at=%s WHERE user_id=%s",
+        (now_iso(), now_iso(), str(user_id)),
+    )
+
+
+def mark_share_reminder_sent(user_id):
+    db_execute("UPDATE users SET last_share_push_at=%s WHERE user_id=%s", (now_iso(), str(user_id)))
 
 
 def checkin_reminder_text(lang):
     lang = lang if lang in ["ms", "en", "zh"] else "ms"
     if lang == "zh":
-        return "🎁 Boss，你已经 2 天没有 Check In 了。\n\n现在回来继续签到，收集 Reward Points 🔥"
+        return "🎁 Boss，今天的 Check In 还没领取哦。\n\n回来按一下，继续收集 Reward Points 🔥"
     if lang == "en":
-        return "🎁 Boss, you have not checked in for 2 days.\n\nCome back now and continue collecting Reward Points 🔥"
-    return "🎁 Boss, anda sudah 2 hari belum Check In.\n\nJom sambung check in dan kumpul Reward Points 🔥"
+        return "🎁 Boss, your Check In reward is waiting.\n\nCome back and continue collecting Reward Points 🔥"
+    return "🎁 Boss, Check In reward anda sedang tunggu.\n\nJom masuk balik dan terus kumpul Reward Points 🔥"
+
+
+def share_reminder_text(lang, user_id):
+    link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+    lang = lang if lang in ["ms", "en", "zh"] else "ms"
+    if lang == "zh":
+        return (
+            "💰 Share & Earn 提醒\n\n"
+            "Boss，分享你的专属 link 给朋友，朋友验证后你就可以继续累积 Reward Points 🔥\n\n"
+            f"🔗 你的邀请链接:\n{link}"
+        )
+    if lang == "en":
+        return (
+            "💰 Share & Earn reminder\n\n"
+            "Boss, share your personal link with friends. When they verify, you can collect more Reward Points 🔥\n\n"
+            f"🔗 Your invite link:\n{link}"
+        )
+    return (
+        "💰 Share & Earn reminder\n\n"
+        "Boss, share link anda kepada kawan. Bila mereka verify, anda boleh kumpul lebih banyak Reward Points 🔥\n\n"
+        f"🔗 Link Boss:\n{link}"
+    )
+
+
+def checkin_push_keyboard(user_id):
+    # Push reminder button should match the main menu wording: 🎁 Check In.
+    # Customer taps this and goes directly to the Check In / Daily Reward page.
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(user_id, "checkin"), callback_data="reward_center")],
+    ])
+
+
+def share_push_keyboard(user_id):
+    # Push reminder button should match the rewards menu wording: 💰 Share & Earn.
+    # Customer taps this and goes directly to their referral/share page inside the bot.
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(user_id, "share_earn_btn"), callback_data="link")],
+    ])
 
 
 # ================= TRANSACTION FLOWS =================
@@ -2805,27 +2894,77 @@ async def help_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def checkin_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    if not CHECKIN_PUSH_ENABLED:
+        return
+
     try:
         rows = get_users_for_checkin_reminder()
         if not rows:
             return
 
+        sent = 0
         for row in rows:
             user_id = str(row.get("user_id"))
             try:
                 await context.bot.send_message(
                     chat_id=int(user_id),
                     text=checkin_reminder_text(row.get("language") or "ms"),
+                    reply_markup=checkin_push_keyboard(user_id),
                 )
                 mark_checkin_reminder_sent(user_id)
-                audit_log(user_id, "checkin_reminder_sent", "2_days_no_checkin")
+                audit_log(user_id, "checkin_push_sent", f"cooldown_days={CHECKIN_PUSH_COOLDOWN_DAYS}")
+                sent += 1
+                if PUSH_SLEEP_SECONDS > 0:
+                    await asyncio.sleep(PUSH_SLEEP_SECONDS)
             except Forbidden:
                 mark_checkin_reminder_sent(user_id)
-                logger.warning("Check-in reminder skipped; bot blocked by user %s", user_id)
+                logger.warning("Check-in push skipped; bot blocked by user %s", user_id)
+            except RetryAfter as e:
+                logger.warning("Check-in push rate limited. Sleeping %s seconds.", e.retry_after)
+                await asyncio.sleep(float(e.retry_after) + 1)
             except Exception as e:
-                logger.warning("Check-in reminder failed user=%s error=%s", user_id, e)
+                logger.warning("Check-in push failed user=%s error=%s", user_id, e)
+
+        logger.info("Check-in push job completed. sent=%s", sent)
     except Exception as e:
         logger.exception("checkin_reminder_job error: %s", e)
+
+
+async def share_earn_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    if not SHARE_PUSH_ENABLED:
+        return
+
+    try:
+        rows = get_users_for_share_reminder()
+        if not rows:
+            return
+
+        sent = 0
+        for row in rows:
+            user_id = str(row.get("user_id"))
+            try:
+                await context.bot.send_message(
+                    chat_id=int(user_id),
+                    text=share_reminder_text(row.get("language") or "ms", user_id),
+                    reply_markup=share_push_keyboard(user_id),
+                )
+                mark_share_reminder_sent(user_id)
+                audit_log(user_id, "share_earn_push_sent", f"cooldown_days={SHARE_PUSH_COOLDOWN_DAYS}")
+                sent += 1
+                if PUSH_SLEEP_SECONDS > 0:
+                    await asyncio.sleep(PUSH_SLEEP_SECONDS)
+            except Forbidden:
+                mark_share_reminder_sent(user_id)
+                logger.warning("Share & Earn push skipped; bot blocked by user %s", user_id)
+            except RetryAfter as e:
+                logger.warning("Share & Earn push rate limited. Sleeping %s seconds.", e.retry_after)
+                await asyncio.sleep(float(e.retry_after) + 1)
+            except Exception as e:
+                logger.warning("Share & Earn push failed user=%s error=%s", user_id, e)
+
+        logger.info("Share & Earn push job completed. sent=%s", sent)
+    except Exception as e:
+        logger.exception("share_earn_reminder_job error: %s", e)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -2864,16 +3003,22 @@ def build_app():
     app.add_handler(CallbackQueryHandler(button))
     app.add_error_handler(error_handler)
 
-    # Daily automatic reminder for users who have not checked in for 2 days.
-    # Runs every day at 12:00 PM Malaysia time.
+    # Gentle automatic push reminders.
+    # Check-in: daily job at 12:00 PM MYT, but each user receives it max once every CHECKIN_PUSH_COOLDOWN_DAYS.
+    # Share & Earn: daily job at 8:30 PM MYT, but each user receives it max once every SHARE_PUSH_COOLDOWN_DAYS.
     if app.job_queue:
         app.job_queue.run_daily(
             checkin_reminder_job,
             time=dt_time(hour=12, minute=0, second=0, tzinfo=TZ),
-            name="daily_checkin_reminder",
+            name="gentle_checkin_push",
+        )
+        app.job_queue.run_daily(
+            share_earn_reminder_job,
+            time=dt_time(hour=20, minute=30, second=0, tzinfo=TZ),
+            name="gentle_share_earn_push",
         )
     else:
-        logger.warning("JobQueue is not available. Install python-telegram-bot[job-queue] to enable auto reminders.")
+        logger.warning("JobQueue is not available. Install python-telegram-bot[job-queue] to enable auto push reminders.")
 
     return app
 
