@@ -742,11 +742,11 @@ def share_push_keyboard(user_id):
 def broadcast_share_earn_keyboard():
     """Inline buttons for promotional broadcasts.
 
-    Button 1 opens the bot Share & Earn page through callback_data="link".
+    Button 1 sends a new Share & Earn page through callback_data="broadcast_share" so the broadcast message stays unchanged.
     Button 2 opens Customer Service for screenshot claim.
     """
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Share Kepada Kawan", callback_data="link")],
+        [InlineKeyboardButton("📤 Share Kepada Kawan", callback_data="broadcast_share")],
         [InlineKeyboardButton("🎧 Screenshot Kepada Customer Service", url=SUPPORT_URL)],
     ])
 
@@ -1679,6 +1679,49 @@ async def send_share_earn_page(query, user_id: str):
                 pass
 
 
+
+
+async def send_share_earn_page_as_new_message(query, user_id: str):
+    """Send Share & Earn as a new message.
+
+    Used by broadcast buttons so the original broadcast stays visible and is not edited.
+    """
+    caption = get_share_earn_caption(user_id)
+    keyboard = get_share_earn_keyboard(user_id)
+
+    photo_source = None
+    opened_file = None
+    try:
+        if SHARE_BANNER_FILE_ID:
+            photo_source = SHARE_BANNER_FILE_ID
+        elif SHARE_BANNER_PATH and os.path.exists(SHARE_BANNER_PATH):
+            opened_file = open(SHARE_BANNER_PATH, "rb")
+            photo_source = opened_file
+
+        if photo_source:
+            try:
+                await query.message.reply_photo(
+                    photo=photo_source,
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+                return
+            except Exception as e:
+                logger.warning("broadcast share send_photo failed, fallback text: %s", e)
+
+        await query.message.reply_text(
+            text=caption,
+            reply_markup=keyboard,
+        )
+
+    finally:
+        if opened_file:
+            try:
+                opened_file.close()
+            except Exception:
+                pass
+
+
 async def safe_send_user(context: ContextTypes.DEFAULT_TYPE, user_id: str, text: str):
     try:
         await context.bot.send_message(chat_id=int(user_id), text=text)
@@ -2316,6 +2359,9 @@ tr(user_id, "must_verify")
         elif data == "profile":
             user = get_user(user_id) or user
             await safe_edit(query, tr(user_id, "profile_text", points=user.get("points", 0), invites=user.get("invited_count", 0)), kb_back_menu(user_id))
+
+        elif data == "broadcast_share":
+            await send_share_earn_page_as_new_message(query, user_id)
 
         elif data == "link":
             await send_share_earn_page(query, user_id)
