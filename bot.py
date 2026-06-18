@@ -739,6 +739,18 @@ def share_push_keyboard(user_id):
     ])
 
 
+def broadcast_share_earn_keyboard():
+    """Inline buttons for promotional broadcasts.
+
+    Button 1 opens the bot Share & Earn page through callback_data="link".
+    Button 2 opens Customer Service for screenshot claim.
+    """
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Share Kepada Kawan", callback_data="link")],
+        [InlineKeyboardButton("🎧 Screenshot Kepada Customer Service", url=SUPPORT_URL)],
+    ])
+
+
 # ================= TRANSACTION FLOWS =================
 
 def claim_daily_reward(user_id: str, reward_type: str, min_invites: int, reward_pool) -> Tuple[bool, str]:
@@ -2791,6 +2803,134 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+async def broadcast_buttons_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Broadcast with fixed Share & Earn + Customer Service buttons.
+
+    How to use:
+    1) Send/upload a banner photo/video/gif to the bot with caption.
+    2) Reply to that media with /broadcast_buttons
+       - Or reply with: /broadcast_buttons new caption here
+    3) The bot sends the media + caption + 2 inline buttons to all users.
+    """
+    if not is_admin(update.effective_user.id):
+        return
+
+    users = get_all_users()
+    success = 0
+    failed = 0
+    reply_markup = broadcast_share_earn_keyboard()
+
+    # MEDIA BROADCAST WITH BUTTONS
+    if update.message.reply_to_message:
+        replied = update.message.reply_to_message
+        caption = " ".join(context.args) if context.args else (replied.caption or "")
+
+        for row in users:
+            target_user_id = row.get("user_id")
+
+            try:
+                if replied.photo:
+                    await context.bot.send_photo(
+                        chat_id=int(target_user_id),
+                        photo=replied.photo[-1].file_id,
+                        caption=caption,
+                        reply_markup=reply_markup,
+                    )
+
+                elif replied.video:
+                    await context.bot.send_video(
+                        chat_id=int(target_user_id),
+                        video=replied.video.file_id,
+                        caption=caption,
+                        reply_markup=reply_markup,
+                    )
+
+                elif replied.animation:
+                    await context.bot.send_animation(
+                        chat_id=int(target_user_id),
+                        animation=replied.animation.file_id,
+                        caption=caption,
+                        reply_markup=reply_markup,
+                    )
+
+                else:
+                    await context.bot.send_message(
+                        chat_id=int(target_user_id),
+                        text=caption or "📢 Broadcast",
+                        reply_markup=reply_markup,
+                    )
+
+                success += 1
+                if PUSH_SLEEP_SECONDS > 0:
+                    await asyncio.sleep(PUSH_SLEEP_SECONDS)
+
+            except Forbidden:
+                failed += 1
+            except RetryAfter as e:
+                await asyncio.sleep(float(e.retry_after) + 1)
+                failed += 1
+            except Exception:
+                failed += 1
+
+        audit_log(
+            update.effective_user.id,
+            "media_broadcast_buttons",
+            f"success={success} failed={failed}"
+        )
+
+        await update.message.reply_text(
+            f"✅ Media broadcast with buttons sent to {success} users.\n❌ Failed: {failed}"
+        )
+        return
+
+    # TEXT BROADCAST WITH BUTTONS
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/broadcast_buttons your message\n\n"
+            "OR\n"
+            "Reply photo/video/gif with /broadcast_buttons\n\n"
+            "Buttons added automatically:\n"
+            "📤 Share Kepada Kawan\n"
+            "🎧 Screenshot Kepada Customer Service"
+        )
+        return
+
+    message = " ".join(context.args)
+
+    for row in users:
+        target_user_id = row.get("user_id")
+
+        try:
+            await context.bot.send_message(
+                chat_id=int(target_user_id),
+                text=message,
+                reply_markup=reply_markup,
+            )
+            success += 1
+            if PUSH_SLEEP_SECONDS > 0:
+                await asyncio.sleep(PUSH_SLEEP_SECONDS)
+
+        except Forbidden:
+            failed += 1
+        except RetryAfter as e:
+            await asyncio.sleep(float(e.retry_after) + 1)
+            failed += 1
+        except Exception:
+            failed += 1
+
+    audit_log(
+        update.effective_user.id,
+        "broadcast_buttons",
+        f"success={success} failed={failed}"
+    )
+
+    await update.message.reply_text(
+        f"✅ Broadcast with buttons sent to {success} users.\n❌ Failed: {failed}"
+    )
+
+
 async def addpoints_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -2997,6 +3137,8 @@ def build_app():
     app.add_handler(CommandHandler("pending_deposit", pending_deposit_cmd))
     app.add_handler(CommandHandler("phones", phones_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    app.add_handler(CommandHandler("broadcast_buttons", broadcast_buttons_cmd))
+    app.add_handler(CommandHandler("broadcast_button", broadcast_buttons_cmd))
     app.add_handler(CommandHandler("addpoints", addpoints_cmd))
     app.add_handler(CommandHandler("setpoints", setpoints_cmd))
     app.add_handler(CommandHandler("resetreward", resetreward_cmd))
