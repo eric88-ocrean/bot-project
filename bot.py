@@ -57,6 +57,9 @@ ADMIN_IDS = set(x.strip() for x in os.getenv("ADMIN_IDS", "1929969589,7889168080
 
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@jomjudi88cuci")
 GROUP_ID = os.getenv("GROUP_ID", "@jomjudi88official")
+SUPERVISOR_GROUP_ID = os.getenv("SUPERVISOR_GROUP_ID", "").strip()
+# Customer service relay group. You can use either SUPPORT_GROUP_ID or SUPERVISOR_GROUP_ID in Railway/Render env.
+SUPPORT_GROUP_ID = os.getenv("SUPPORT_GROUP_ID", SUPERVISOR_GROUP_ID).strip()
 
 CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/jomjudi88cuci")
 GROUP_URL = os.getenv("GROUP_URL", "https://t.me/jomjudi88official")
@@ -111,6 +114,8 @@ logger = logging.getLogger("jomjudi88-bot-v4")
 DB_POOL: Optional[SimpleConnectionPool] = None
 USER_CALLBACK_LAST_SEEN = {}
 START_LOCK = {}
+
+SUPERVISOR_MESSAGE_MAP = {}
 
 
 # ================= HELPERS =================
@@ -288,6 +293,7 @@ def init_db():
                 "last_seen_at TEXT DEFAULT ''",
                 "created_at TEXT DEFAULT ''",
                 "language TEXT DEFAULT ''",
+                "is_banned INTEGER DEFAULT 0",
             ]
             for col in user_columns:
                 cur.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col}")
@@ -349,6 +355,15 @@ def init_db():
                 )
             """)
 
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS support_messages (
+                    group_message_id BIGINT PRIMARY KEY,
+                    user_id TEXT,
+                    message_type TEXT DEFAULT '',
+                    created_at TEXT DEFAULT ''
+                )
+            """)
+
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_invites ON users(invited_count DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_phone_number ON users(phone_number)")
@@ -360,6 +375,7 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_deposit_mission_user_status ON deposit_mission_requests(user_id, status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_deposit_mission_status ON deposit_mission_requests(status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_support_messages_user ON support_messages(user_id)")
 
         conn.commit()
         logger.info("Database initialized.")
@@ -391,6 +407,458 @@ def get_user_phone(user_id) -> str:
         return user.get("phone_number") or "Not verified"
     except Exception:
         return "Not verified"
+
+
+
+# ================= CUSTOMER SERVICE RELAY =================
+
+def get_support_group_id():
+    raw = (SUPPORT_GROUP_ID or SUPERVISOR_GROUP_ID or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        logger.warning("Invalid SUPPORT_GROUP_ID/SUPERVISOR_GROUP_ID: %s", raw)
+        return None
+
+
+def support_is_enabled() -> bool:
+    return get_support_group_id() is not None
+
+
+def is_support_group_chat(chat_id) -> bool:
+    support_id = get_support_group_id()
+    return support_id is not None and str(chat_id) == str(support_id)
+
+
+def is_user_banned(user_id) -> bool:
+    try:
+        row = get_user(user_id) or {}
+        return safe_int(row.get("is_banned", 0)) == 1
+    except Exception:
+        return False
+
+
+def set_user_banned(user_id, banned: bool):
+    db_execute(
+        "UPDATE users SET is_banned=%s WHERE user_id=%s",
+        (1 if banned else 0, str(user_id)),
+    )
+
+
+def support_buttons(target_user_id):
+    target_user_id = str(target_user_id)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👤 Profile", callback_data=f"sup_profile:{target_user_id}"),
+            InlineKeyboardButton("⭐ Points", callback_data=f"sup_points:{target_user_id}"),
+        ],
+        [
+            InlineKeyboardButton("📱 Copy Phone", callback_data=f"sup_phone:{target_user_id}"),
+        ],
+        [
+            InlineKeyboardButton("🚫 Ban", callback_data=f"sup_ban:{target_user_id}"),
+            InlineKeyboardButton("✅ Unban", callback_data=f"sup_unban:{target_user_id}"),
+        ],
+    ])
+
+
+def support_username(tg_user) -> str:
+    try:
+        return f"@{tg_user.username}" if tg_user and tg_user.username else "No Username"
+    except Exception:
+        return "No Username"
+
+
+def support_customer_header(tg_user, db_user=None) -> str:
+    db_user = db_user or {}
+    phone = db_user.get("phone_number") or "Not Verified"
+    points = safe_int(db_user.get("points", 0))
+    invites = safe_int(db_user.get("invited_count", 0))
+    banned = "YES" if safe_int(db_user.get("is_banned", 0)) == 1 else "NO"
+    full_name = tg_user.full_name if tg_user else (db_user.get("name") or "Customer")
+    username = support_username(tg_user)
+    user_id = str(tg_user.id) if tg_user else str(db_user.get("user_id", ""))
+
+    return (
+        "📩 Customer Message\n\n"
+        f"👤 {full_name}\n"
+        f"📱 {phone}\n"
+        f"🔗 {username}\n"
+        f"🆔 {user_id}\n"
+        f"⭐ Points: {points}\n"
+        f"👥 Invites: {invites}\n"
+        f"🚫 Banned: {banned}\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+    )
+
+
+def support_store_message(group_message_id, user_id, message_type=""):
+    try:
+        SUPERVISOR_MESSAGE_MAP[int(group_message_id)] = str(user_id)
+        db_execute(
+            """
+            INSERT INTO support_messages (group_message_id, user_id, message_type, created_at)
+            VALUES (%s,%s,%s,%s)
+            ON CONFLICT (group_message_id) DO UPDATE SET
+                user_id=EXCLUDED.user_id,
+                message_type=EXCLUDED.message_type,
+                created_at=EXCLUDED.created_at
+            """,
+            (int(group_message_id), str(user_id), str(message_type or ""), now_iso()),
+        )
+    except Exception as e:
+        logger.warning("support_store_message failed: %s", e)
+
+
+def support_lookup_user_id(group_message_id):
+    try:
+        mid = int(group_message_id)
+        if mid in SUPERVISOR_MESSAGE_MAP:
+            return SUPERVISOR_MESSAGE_MAP[mid]
+        row = db_fetchone(
+            "SELECT user_id FROM support_messages WHERE group_message_id=%s",
+            (mid,),
+        )
+        if row:
+            return str(row.get("user_id"))
+    except Exception as e:
+        logger.warning("support_lookup_user_id failed: %s", e)
+    return None
+
+
+def support_profile_text(target_user_id):
+    row = get_user(target_user_id)
+    if not row:
+        return "❌ User not found."
+
+    verified = "✅ Yes" if safe_int(row.get("phone_verified", 0)) == 1 else "❌ No"
+    banned = "🚫 Yes" if safe_int(row.get("is_banned", 0)) == 1 else "✅ No"
+    return (
+        "👤 Customer Profile\n\n"
+        f"Name: {row.get('name') or 'User'}\n"
+        f"User ID: {row.get('user_id')}\n"
+        f"Phone: {row.get('phone_number') or 'Not Verified'}\n"
+        f"Verified: {verified}\n"
+        f"Banned: {banned}\n\n"
+        f"⭐ Points: {safe_int(row.get('points', 0))}\n"
+        f"👥 Invites: {safe_int(row.get('invited_count', 0))}\n"
+        f"🎁 Gift Claimed: {safe_int(row.get('gift_claimed', 0))}\n"
+        f"🔥 Check-in Streak: {safe_int(row.get('checkin_streak', 0))}\n\n"
+        f"Created: {row.get('created_at') or '-'}\n"
+        f"Last Seen: {row.get('last_seen_at') or '-'}"
+    )
+
+
+def support_points_text(target_user_id):
+    row = get_user(target_user_id)
+    if not row:
+        return "❌ User not found."
+
+    deposits = db_fetchone("""
+        SELECT
+            COALESCE(SUM(CASE WHEN deposit_amount=100 AND status='approved' THEN 1 ELSE 0 END), 0) AS rm100_count,
+            COALESCE(SUM(CASE WHEN deposit_amount=300 AND status='approved' THEN 1 ELSE 0 END), 0) AS rm300_count
+        FROM deposit_mission_requests
+        WHERE user_id=%s
+    """, (str(target_user_id),)) or {}
+
+    return (
+        "⭐ Reward Status\n\n"
+        f"Name: {row.get('name') or 'User'}\n"
+        f"User ID: {row.get('user_id')}\n"
+        f"Phone: {row.get('phone_number') or 'Not Verified'}\n\n"
+        f"⭐ Points: {safe_int(row.get('points', 0))}\n"
+        f"👥 Invites: {safe_int(row.get('invited_count', 0))}\n"
+        f"🔥 Check-in Streak: {safe_int(row.get('checkin_streak', 0))}\n\n"
+        f"RM100 Mission Approved: {safe_int(deposits.get('rm100_count', 0))}\n"
+        f"RM300 Mission Approved: {safe_int(deposits.get('rm300_count', 0))}"
+    )
+
+
+async def notify_support_group(context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None):
+    support_id = get_support_group_id()
+    if support_id is None:
+        return None
+    try:
+        return await context.bot.send_message(
+            chat_id=support_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+    except Exception as e:
+        logger.warning("notify_support_group failed: %s", e)
+        return None
+
+
+async def notify_support_new_user(context: ContextTypes.DEFAULT_TYPE, tg_user, referrer_id=None):
+    support_id = get_support_group_id()
+    if support_id is None or not tg_user:
+        return
+    try:
+        db_user = get_user(tg_user.id) or {}
+        text = (
+            "🆕 New Customer Joined\n\n"
+            f"👤 {tg_user.full_name}\n"
+            f"📱 {db_user.get('phone_number') or 'Not Verified'}\n"
+            f"🔗 {support_username(tg_user)}\n"
+            f"🆔 {tg_user.id}\n"
+            f"👥 Referrer: {referrer_id or '-'}"
+        )
+        await context.bot.send_message(
+            chat_id=support_id,
+            text=text,
+            reply_markup=support_buttons(tg_user.id),
+        )
+    except Exception as e:
+        logger.warning("notify_support_new_user failed: %s", e)
+
+
+async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Relay a verified customer's private message/media to the support group."""
+    try:
+        support_id = get_support_group_id()
+        if support_id is None:
+            return False
+
+        if not update.effective_chat or update.effective_chat.type != "private":
+            return False
+        if not update.effective_user or not update.effective_message:
+            return False
+
+        tg_user = update.effective_user
+        user_id = str(tg_user.id)
+        user_name = tg_user.first_name or "User"
+        ensure_user(user_id, user_name)
+
+        if is_user_banned(user_id):
+            return True
+
+        if not is_phone_verified(user_id):
+            await request_phone_verification(update)
+            return True
+
+        db_user = get_user(user_id) or {}
+        msg = update.effective_message
+        header = support_customer_header(tg_user, db_user)
+        caption = (msg.caption or "").strip()
+        text = (msg.text or "").strip()
+
+        sent = None
+        if text:
+            sent = await context.bot.send_message(
+                chat_id=support_id,
+                text=header + text,
+                reply_markup=support_buttons(user_id),
+            )
+            message_type = "text"
+
+        elif msg.photo:
+            cap = (header + (caption or "📷 Photo / Screenshot"))[:1024]
+            sent = await context.bot.send_photo(
+                chat_id=support_id,
+                photo=msg.photo[-1].file_id,
+                caption=cap,
+                reply_markup=support_buttons(user_id),
+            )
+            message_type = "photo"
+
+        elif msg.document:
+            cap = (header + (caption or f"📄 File: {msg.document.file_name or ''}"))[:1024]
+            sent = await context.bot.send_document(
+                chat_id=support_id,
+                document=msg.document.file_id,
+                caption=cap,
+                reply_markup=support_buttons(user_id),
+            )
+            message_type = "document"
+
+        elif msg.video:
+            cap = (header + (caption or "🎥 Video"))[:1024]
+            sent = await context.bot.send_video(
+                chat_id=support_id,
+                video=msg.video.file_id,
+                caption=cap,
+                reply_markup=support_buttons(user_id),
+            )
+            message_type = "video"
+
+        elif msg.voice:
+            sent = await context.bot.send_voice(
+                chat_id=support_id,
+                voice=msg.voice.file_id,
+                caption=(header + "🎤 Voice Message")[:1024],
+                reply_markup=support_buttons(user_id),
+            )
+            message_type = "voice"
+
+        elif msg.audio:
+            cap = (header + (caption or "🎵 Audio"))[:1024]
+            sent = await context.bot.send_audio(
+                chat_id=support_id,
+                audio=msg.audio.file_id,
+                caption=cap,
+                reply_markup=support_buttons(user_id),
+            )
+            message_type = "audio"
+
+        elif msg.animation:
+            cap = (header + (caption or "🎞 Animation"))[:1024]
+            sent = await context.bot.send_animation(
+                chat_id=support_id,
+                animation=msg.animation.file_id,
+                caption=cap,
+                reply_markup=support_buttons(user_id),
+            )
+            message_type = "animation"
+
+        elif msg.sticker:
+            info = await context.bot.send_message(
+                chat_id=support_id,
+                text=header + "🌟 Sticker",
+                reply_markup=support_buttons(user_id),
+            )
+            support_store_message(info.message_id, user_id, "sticker_info")
+            sent = await context.bot.send_sticker(
+                chat_id=support_id,
+                sticker=msg.sticker.file_id,
+            )
+            message_type = "sticker"
+
+        else:
+            info = await context.bot.send_message(
+                chat_id=support_id,
+                text=header + "📨 Unsupported message type. Copied below if possible.",
+                reply_markup=support_buttons(user_id),
+            )
+            support_store_message(info.message_id, user_id, "unsupported_info")
+            sent = await context.bot.copy_message(
+                chat_id=support_id,
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+            )
+            message_type = "copy"
+
+        if sent:
+            support_store_message(sent.message_id, user_id, message_type)
+            try:
+                await msg.reply_text("✅ Customer service received your message.")
+            except Exception:
+                pass
+            return True
+
+    except Exception as e:
+        logger.exception("relay_customer_to_support failed: %s", e)
+        try:
+            await update.effective_message.reply_text("⚠️ Customer service is busy. Please try again later.")
+        except Exception:
+            pass
+    return False
+
+
+async def customer_private_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles private customer media/messages not caught by text/contact handlers."""
+    try:
+        if not update.effective_message:
+            return
+        if update.effective_message.text or update.effective_message.contact:
+            return
+        await relay_customer_to_support(update, context)
+    except Exception as e:
+        logger.exception("customer_private_media_handler failed: %s", e)
+
+
+async def support_group_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Support staff reply to a relayed customer message. Bot copies the reply to the customer."""
+    try:
+        if not update.effective_chat or not is_support_group_chat(update.effective_chat.id):
+            return
+        if not update.effective_user or not is_admin(update.effective_user.id):
+            return
+        if not update.effective_message or not update.effective_message.reply_to_message:
+            return
+
+        msg = update.effective_message
+        replied = msg.reply_to_message
+        target_user_id = support_lookup_user_id(replied.message_id)
+        if not target_user_id:
+            return
+
+        await context.bot.copy_message(
+            chat_id=int(target_user_id),
+            from_chat_id=msg.chat_id,
+            message_id=msg.message_id,
+        )
+        try:
+            await msg.reply_text(f"✅ Sent to customer {target_user_id}")
+        except Exception:
+            pass
+        audit_log(update.effective_user.id, "support_reply", f"target={target_user_id}")
+
+    except Forbidden:
+        try:
+            await update.effective_message.reply_text("❌ Customer blocked the bot or cannot receive messages.")
+        except Exception:
+            pass
+    except Exception as e:
+        logger.exception("support_group_reply_handler failed: %s", e)
+
+
+async def handle_support_callback(query, data: str, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not is_admin(query.from_user.id):
+            await query.message.reply_text("❌ Admin only.")
+            return
+
+        try:
+            action, target_user_id = data.split(":", 1)
+        except ValueError:
+            await query.message.reply_text("⚠️ Invalid support button.")
+            return
+
+        target_user_id = str(target_user_id).strip()
+        if action == "sup_profile":
+            await query.message.reply_text(support_profile_text(target_user_id))
+
+        elif action == "sup_points":
+            await query.message.reply_text(support_points_text(target_user_id))
+
+        elif action == "sup_phone":
+            row = get_user(target_user_id) or {}
+            await query.message.reply_text(row.get("phone_number") or "Not Verified")
+
+        elif action == "sup_ban":
+            set_user_banned(target_user_id, True)
+            row = get_user(target_user_id) or {}
+            await query.message.reply_text(
+                "🚫 User Banned\n\n"
+                f"Name: {row.get('name') or 'User'}\n"
+                f"ID: {target_user_id}\n"
+                f"Phone: {row.get('phone_number') or 'Not Verified'}"
+            )
+            audit_log(query.from_user.id, "support_ban_user", f"target={target_user_id}")
+
+        elif action == "sup_unban":
+            set_user_banned(target_user_id, False)
+            row = get_user(target_user_id) or {}
+            await query.message.reply_text(
+                "✅ User Unbanned\n\n"
+                f"Name: {row.get('name') or 'User'}\n"
+                f"ID: {target_user_id}\n"
+                f"Phone: {row.get('phone_number') or 'Not Verified'}"
+            )
+            audit_log(query.from_user.id, "support_unban_user", f"target={target_user_id}")
+
+        else:
+            await query.message.reply_text("⚠️ Unknown support button.")
+
+    except Exception as e:
+        logger.exception("handle_support_callback failed: %s", e)
+        try:
+            await query.message.reply_text("⚠️ Support action failed.")
+        except Exception:
+            pass
 
 
 def set_user_language(user_id, language):
@@ -1859,6 +2327,9 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Users often tap /start and then immediately share contact.
         ensure_user(user_id, user_name)
 
+        if is_user_banned(user_id) and not is_admin(user_id):
+            return
+
         if contact.user_id and str(contact.user_id) != user_id:
             await update.effective_message.reply_text(
                 tr(user_id, "verify_own_phone"),
@@ -2200,12 +2671,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             create_user(user_id, user_name, valid_referrer)
             audit_log(user_id, "start_new_user", f"referrer={valid_referrer or ''}")
+            await notify_support_new_user(context, user, valid_referrer)
             # Referral point is credited only after the new user verifies a Malaysia phone number.
         else:
             create_user(user_id, user_name, existing.get("referrer_id"))
             audit_log(user_id, "start_existing_user", "")
 
         current_user = get_user(user_id)
+        if current_user and safe_int(current_user.get("is_banned", 0)) == 1 and not is_admin(user_id):
+            return
+
         if not current_user or not current_user.get("language"):
             await update.effective_message.reply_text(
                 get_language_text(),
@@ -2251,6 +2726,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_name = query.from_user.first_name or "User"
         data = query.data or ""
 
+        if data.startswith("sup_"):
+            await handle_support_callback(query, data, context)
+            return
+
         clean_callback_cache()
         if not callback_allowed(user_id):
             try:
@@ -2260,6 +2739,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         user = ensure_user(user_id, user_name)
+
+        if safe_int(user.get("is_banned", 0)) == 1 and not is_admin(user_id):
+            try:
+                await query.answer("Your account is blocked.", show_alert=True)
+            except Exception:
+                pass
+            return
 
         if data.startswith("lang_"):
             selected_lang = data.replace("lang_", "", 1)
@@ -3153,6 +3639,17 @@ async def share_earn_reminder_job(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("share_earn_reminder_job error: %s", e)
 
 
+
+async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.effective_message.reply_text(
+            f"Chat ID: {update.effective_chat.id}\n"
+            f"Chat Type: {update.effective_chat.type}"
+        )
+    except Exception as e:
+        logger.exception("chatid_cmd failed: %s", e)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled Telegram error: %s", context.error)
 
@@ -3172,8 +3669,10 @@ def build_app():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_cmd))
-    app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_phone_handler))
+    app.add_handler(CommandHandler("chatid", chatid_cmd))
+    app.add_handler(MessageHandler(filters.CONTACT & filters.ChatType.PRIVATE, contact_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_phone_handler))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, customer_private_media_handler))
     app.add_handler(CommandHandler("help_admin", help_admin_cmd))
     app.add_handler(CommandHandler("all_users", all_users_cmd))
     app.add_handler(CommandHandler("top_users", top_users_cmd))
@@ -3189,6 +3688,7 @@ def build_app():
     app.add_handler(CommandHandler("setpoints", setpoints_cmd))
     app.add_handler(CommandHandler("resetreward", resetreward_cmd))
     app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.ALL, support_group_reply_handler), group=1)
     app.add_error_handler(error_handler)
 
     # Gentle automatic push reminders.
