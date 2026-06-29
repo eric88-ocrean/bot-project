@@ -15,6 +15,7 @@
 
 import os
 import random
+import re
 import logging
 import time
 import asyncio
@@ -364,6 +365,31 @@ def init_db():
                 )
             """)
 
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS support_tickets (
+                    user_id TEXT PRIMARY KEY,
+                    status TEXT DEFAULT 'open',
+                    assigned_to TEXT DEFAULT '',
+                    assigned_name TEXT DEFAULT '',
+                    priority TEXT DEFAULT '',
+                    last_group_message_id BIGINT DEFAULT 0,
+                    created_at TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT ''
+                )
+            """)
+
+            support_ticket_columns = [
+                "status TEXT DEFAULT 'open'",
+                "assigned_to TEXT DEFAULT ''",
+                "assigned_name TEXT DEFAULT ''",
+                "priority TEXT DEFAULT ''",
+                "last_group_message_id BIGINT DEFAULT 0",
+                "created_at TEXT DEFAULT ''",
+                "updated_at TEXT DEFAULT ''",
+            ]
+            for col in support_ticket_columns:
+                cur.execute(f"ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS {col}")
+
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_invites ON users(invited_count DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_phone_number ON users(phone_number)")
@@ -376,6 +402,8 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_deposit_mission_status ON deposit_mission_requests(status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_support_messages_user ON support_messages(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_support_tickets_assigned ON support_tickets(assigned_to)")
 
         conn.commit()
         logger.info("Database initialized.")
@@ -410,7 +438,44 @@ def get_user_phone(user_id) -> str:
 
 
 
+
 # ================= CUSTOMER SERVICE RELAY =================
+
+SUPPORT_QUICK_REPLIES = {
+    "sup_qr_screen": (
+        "📸 Ask Screenshot",
+        "Boss，请发送 deposit / transaction screenshot 给客服检查，谢谢。",
+    ),
+    "sup_qr_userid": (
+        "🆔 Ask User ID",
+        "Boss，请发送你的游戏账号 User ID / Username 给客服，谢谢。",
+    ),
+    "sup_qr_deposit": (
+        "💰 Deposit Guide",
+        "Boss，充值步骤：\n\n1. 点击 Daftar / Register 注册或登录账号\n2. 进入 Deposit 页面\n3. 选择 payment method 并完成转账\n4. 完成后发送 deposit screenshot 给客服检查。",
+    ),
+    "sup_qr_rm38": (
+        "🎁 RM38 Rules",
+        "Boss，Free RM38 条件：\n\n1. 必须是新会员\n2. 已注册 JOMJUDI88 账号\n3. 首次 deposit RM20+\n4. 加入官方 Channel 和 Group\n5. 发送 deposit screenshot 给客服审核。",
+    ),
+    "sup_qr_wait": (
+        "⏳ Please Wait",
+        "Boss，客服正在帮你检查，请稍等一下。",
+    ),
+    "sup_qr_done": (
+        "✅ Done Reply",
+        "Boss，已经处理好了，谢谢。",
+    ),
+}
+
+SUPPORT_STATUS_LABELS = {
+    "pending": "🟡 Pending",
+    "replied": "🟢 Replied",
+    "done": "✅ Done",
+    "urgent": "🔥 Urgent",
+    "open": "🟡 Open",
+}
+
 
 def get_support_group_id():
     raw = (SUPPORT_GROUP_ID or SUPERVISOR_GROUP_ID or "").strip()
@@ -447,6 +512,63 @@ def set_user_banned(user_id, banned: bool):
     )
 
 
+def support_get_ticket(user_id):
+    try:
+        return db_fetchone("SELECT * FROM support_tickets WHERE user_id=%s", (str(user_id),))
+    except Exception as e:
+        logger.warning("support_get_ticket failed: %s", e)
+        return None
+
+
+def support_touch_ticket(user_id, status="open", assigned_to=None, assigned_name=None, priority=None, last_group_message_id=None):
+    """Create/update a lightweight support ticket for the customer service group."""
+    try:
+        current = support_get_ticket(user_id) or {}
+        final_status = status if status is not None else (current.get("status") or "open")
+        final_assigned_to = str(assigned_to) if assigned_to is not None else (current.get("assigned_to") or "")
+        final_assigned_name = assigned_name if assigned_name is not None else (current.get("assigned_name") or "")
+        final_priority = priority if priority is not None else (current.get("priority") or "")
+        final_last_group_message_id = safe_int(last_group_message_id, safe_int(current.get("last_group_message_id", 0))) if last_group_message_id is not None else safe_int(current.get("last_group_message_id", 0))
+        created_at = current.get("created_at") or now_iso()
+        db_execute(
+            """
+            INSERT INTO support_tickets
+            (user_id, status, assigned_to, assigned_name, priority, last_group_message_id, created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (user_id) DO UPDATE SET
+                status=EXCLUDED.status,
+                assigned_to=EXCLUDED.assigned_to,
+                assigned_name=EXCLUDED.assigned_name,
+                priority=EXCLUDED.priority,
+                last_group_message_id=EXCLUDED.last_group_message_id,
+                updated_at=EXCLUDED.updated_at
+            """,
+            (
+                str(user_id),
+                final_status,
+                final_assigned_to,
+                final_assigned_name,
+                final_priority,
+                int(final_last_group_message_id or 0),
+                created_at,
+                now_iso(),
+            ),
+        )
+    except Exception as e:
+        logger.warning("support_touch_ticket failed: %s", e)
+
+
+def support_ticket_line(user_id) -> str:
+    ticket = support_get_ticket(user_id) or {}
+    status = ticket.get("status") or "open"
+    status_label = SUPPORT_STATUS_LABELS.get(status, status)
+    assigned = ticket.get("assigned_name") or "-"
+    priority = ticket.get("priority") or "Normal"
+    if priority == "urgent":
+        priority = "🔥 Urgent"
+    return f"📌 Status: {status_label}\n👤 Assigned: {assigned}\n⚡ Priority: {priority}"
+
+
 def support_buttons(target_user_id):
     target_user_id = str(target_user_id)
     return InlineKeyboardMarkup([
@@ -456,6 +578,27 @@ def support_buttons(target_user_id):
         ],
         [
             InlineKeyboardButton("📱 Copy Phone", callback_data=f"sup_phone:{target_user_id}"),
+            InlineKeyboardButton("👤 Assign Me", callback_data=f"sup_assign:{target_user_id}"),
+        ],
+        [
+            InlineKeyboardButton("📸 Ask Screenshot", callback_data=f"sup_qr_screen:{target_user_id}"),
+            InlineKeyboardButton("🆔 Ask User ID", callback_data=f"sup_qr_userid:{target_user_id}"),
+        ],
+        [
+            InlineKeyboardButton("💰 Deposit Guide", callback_data=f"sup_qr_deposit:{target_user_id}"),
+            InlineKeyboardButton("🎁 RM38 Rules", callback_data=f"sup_qr_rm38:{target_user_id}"),
+        ],
+        [
+            InlineKeyboardButton("⏳ Please Wait", callback_data=f"sup_qr_wait:{target_user_id}"),
+            InlineKeyboardButton("✅ Done Reply", callback_data=f"sup_qr_done:{target_user_id}"),
+        ],
+        [
+            InlineKeyboardButton("🟡 Pending", callback_data=f"sup_status_pending:{target_user_id}"),
+            InlineKeyboardButton("🟢 Replied", callback_data=f"sup_status_replied:{target_user_id}"),
+        ],
+        [
+            InlineKeyboardButton("🔥 Urgent", callback_data=f"sup_status_urgent:{target_user_id}"),
+            InlineKeyboardButton("✅ Close", callback_data=f"sup_status_done:{target_user_id}"),
         ],
         [
             InlineKeyboardButton("🚫 Ban", callback_data=f"sup_ban:{target_user_id}"),
@@ -471,26 +614,65 @@ def support_username(tg_user) -> str:
         return "No Username"
 
 
-def support_customer_header(tg_user, db_user=None) -> str:
+def support_customer_header(tg_user, db_user=None, message_label="💬 Message") -> str:
     db_user = db_user or {}
+    user_id = str(tg_user.id) if tg_user else str(db_user.get("user_id", ""))
     phone = db_user.get("phone_number") or "Not Verified"
+    phone_verified = "✅ Yes" if safe_int(db_user.get("phone_verified", 0)) == 1 else "⚠️ Not Verified"
     points = safe_int(db_user.get("points", 0))
     invites = safe_int(db_user.get("invited_count", 0))
+    gift = "Yes" if safe_int(db_user.get("gift_claimed", 0)) == 1 else "No"
     banned = "YES" if safe_int(db_user.get("is_banned", 0)) == 1 else "NO"
     full_name = tg_user.full_name if tg_user else (db_user.get("name") or "Customer")
     username = support_username(tg_user)
-    user_id = str(tg_user.id) if tg_user else str(db_user.get("user_id", ""))
 
     return (
-        "📩 Customer Message\n\n"
-        f"👤 {full_name}\n"
-        f"📱 {phone}\n"
-        f"🔗 {username}\n"
-        f"🆔 {user_id}\n"
+        "🟡 OPEN CUSTOMER CHAT\n\n"
+        f"👤 Name: {full_name}\n"
+        f"📱 Phone: {phone}\n"
+        f"✅ Verified: {phone_verified}\n"
+        f"🔗 Username: {username}\n"
+        f"🆔 User ID: {user_id}\n\n"
         f"⭐ Points: {points}\n"
         f"👥 Invites: {invites}\n"
+        f"🎁 RM38 Claimed: {gift}\n"
         f"🚫 Banned: {banned}\n\n"
-        "━━━━━━━━━━━━━━\n\n"
+        f"{support_ticket_line(user_id)}\n\n"
+        "━━━━━━━━━━━━━━\n"
+        f"{message_label}:\n"
+    )
+
+
+def support_intro_text(user_id=None) -> str:
+    lang = get_user_language(user_id) if user_id else "ms"
+    if lang == "zh":
+        return (
+            "🎧 JOMJUDI88 客服\n\n"
+            "请直接在这里输入你的问题，或发送 screenshot / 文件。\n"
+            "客服会尽快回复你。\n\n"
+            "如果是 Claim / Deposit 问题，请一起发送：\n"
+            "• 游戏账号 User ID / Username\n"
+            "• Deposit screenshot\n"
+            "• 遇到的问题"
+        )
+    if lang == "en":
+        return (
+            "🎧 JOMJUDI88 Customer Service\n\n"
+            "Type your question here, or send a screenshot/file.\n"
+            "Our customer service team will reply as soon as possible.\n\n"
+            "For claim/deposit issues, please include:\n"
+            "• Game User ID / Username\n"
+            "• Deposit screenshot\n"
+            "• Your issue"
+        )
+    return (
+        "🎧 JOMJUDI88 Customer Service\n\n"
+        "Boss, terus taip masalah anda di sini, atau hantar screenshot / file.\n"
+        "Customer service akan reply secepat mungkin.\n\n"
+        "Untuk claim/deposit, sila hantar sekali:\n"
+        "• Game User ID / Username\n"
+        "• Deposit screenshot\n"
+        "• Masalah yang Boss hadapi"
     )
 
 
@@ -533,8 +715,12 @@ def support_profile_text(target_user_id):
     if not row:
         return "❌ User not found."
 
-    verified = "✅ Yes" if safe_int(row.get("phone_verified", 0)) == 1 else "❌ No"
+    verified = "✅ Yes" if safe_int(row.get("phone_verified", 0)) == 1 else "⚠️ Not Verified"
     banned = "🚫 Yes" if safe_int(row.get("is_banned", 0)) == 1 else "✅ No"
+    ticket = support_get_ticket(target_user_id) or {}
+    status = SUPPORT_STATUS_LABELS.get(ticket.get("status") or "open", ticket.get("status") or "open")
+    assigned = ticket.get("assigned_name") or "-"
+    priority = "🔥 Urgent" if ticket.get("priority") == "urgent" else "Normal"
     return (
         "👤 Customer Profile\n\n"
         f"Name: {row.get('name') or 'User'}\n"
@@ -546,6 +732,9 @@ def support_profile_text(target_user_id):
         f"👥 Invites: {safe_int(row.get('invited_count', 0))}\n"
         f"🎁 Gift Claimed: {safe_int(row.get('gift_claimed', 0))}\n"
         f"🔥 Check-in Streak: {safe_int(row.get('checkin_streak', 0))}\n\n"
+        f"📌 Ticket Status: {status}\n"
+        f"👤 Assigned: {assigned}\n"
+        f"⚡ Priority: {priority}\n\n"
         f"Created: {row.get('created_at') or '-'}\n"
         f"Last Seen: {row.get('last_seen_at') or '-'}"
     )
@@ -571,6 +760,7 @@ def support_points_text(target_user_id):
         f"Phone: {row.get('phone_number') or 'Not Verified'}\n\n"
         f"⭐ Points: {safe_int(row.get('points', 0))}\n"
         f"👥 Invites: {safe_int(row.get('invited_count', 0))}\n"
+        f"🎁 RM38 Claimed: {'Yes' if safe_int(row.get('gift_claimed', 0)) == 1 else 'No'}\n"
         f"🔥 Check-in Streak: {safe_int(row.get('checkin_streak', 0))}\n\n"
         f"RM100 Mission Approved: {safe_int(deposits.get('rm100_count', 0))}\n"
         f"RM300 Mission Approved: {safe_int(deposits.get('rm300_count', 0))}"
@@ -598,25 +788,36 @@ async def notify_support_new_user(context: ContextTypes.DEFAULT_TYPE, tg_user, r
         return
     try:
         db_user = get_user(tg_user.id) or {}
+        support_touch_ticket(tg_user.id, status="open")
         text = (
             "🆕 New Customer Joined\n\n"
             f"👤 {tg_user.full_name}\n"
             f"📱 {db_user.get('phone_number') or 'Not Verified'}\n"
+            f"✅ Verified: {'Yes' if safe_int(db_user.get('phone_verified', 0)) == 1 else 'Not Verified'}\n"
             f"🔗 {support_username(tg_user)}\n"
             f"🆔 {tg_user.id}\n"
             f"👥 Referrer: {referrer_id or '-'}"
         )
-        await context.bot.send_message(
+        sent = await context.bot.send_message(
             chat_id=support_id,
             text=text,
             reply_markup=support_buttons(tg_user.id),
         )
+        if sent:
+            support_store_message(sent.message_id, tg_user.id, "new_user")
+            support_touch_ticket(tg_user.id, last_group_message_id=sent.message_id)
     except Exception as e:
         logger.warning("notify_support_new_user failed: %s", e)
 
 
+async def support_send_text_to_customer(context: ContextTypes.DEFAULT_TYPE, target_user_id, text: str, admin_id=None, action="support_quick_reply"):
+    await context.bot.send_message(chat_id=int(target_user_id), text=text)
+    if admin_id:
+        audit_log(admin_id, action, f"target={target_user_id}")
+
+
 async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Relay a verified customer's private message/media to the support group."""
+    """Relay customer private messages/media to the support group."""
     try:
         support_id = get_support_group_id()
         if support_id is None:
@@ -635,18 +836,15 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
         if is_user_banned(user_id):
             return True
 
-        if not is_phone_verified(user_id):
-            await request_phone_verification(update)
-            return True
-
+        support_touch_ticket(user_id, status="open")
         db_user = get_user(user_id) or {}
         msg = update.effective_message
-        header = support_customer_header(tg_user, db_user)
         caption = (msg.caption or "").strip()
         text = (msg.text or "").strip()
 
         sent = None
         if text:
+            header = support_customer_header(tg_user, db_user, "💬 Message")
             sent = await context.bot.send_message(
                 chat_id=support_id,
                 text=header + text,
@@ -655,7 +853,8 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
             message_type = "text"
 
         elif msg.photo:
-            cap = (header + (caption or "📷 Photo / Screenshot"))[:1024]
+            header = support_customer_header(tg_user, db_user, "📷 Photo / Screenshot")
+            cap = (header + (caption or "Photo received"))[:1024]
             sent = await context.bot.send_photo(
                 chat_id=support_id,
                 photo=msg.photo[-1].file_id,
@@ -665,7 +864,8 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
             message_type = "photo"
 
         elif msg.document:
-            cap = (header + (caption or f"📄 File: {msg.document.file_name or ''}"))[:1024]
+            header = support_customer_header(tg_user, db_user, "📄 Document / File")
+            cap = (header + (caption or f"File: {msg.document.file_name or ''}"))[:1024]
             sent = await context.bot.send_document(
                 chat_id=support_id,
                 document=msg.document.file_id,
@@ -675,7 +875,8 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
             message_type = "document"
 
         elif msg.video:
-            cap = (header + (caption or "🎥 Video"))[:1024]
+            header = support_customer_header(tg_user, db_user, "🎥 Video")
+            cap = (header + (caption or "Video received"))[:1024]
             sent = await context.bot.send_video(
                 chat_id=support_id,
                 video=msg.video.file_id,
@@ -685,16 +886,18 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
             message_type = "video"
 
         elif msg.voice:
+            header = support_customer_header(tg_user, db_user, "🎤 Voice Message")
             sent = await context.bot.send_voice(
                 chat_id=support_id,
                 voice=msg.voice.file_id,
-                caption=(header + "🎤 Voice Message")[:1024],
+                caption=(header + "Voice received")[:1024],
                 reply_markup=support_buttons(user_id),
             )
             message_type = "voice"
 
         elif msg.audio:
-            cap = (header + (caption or "🎵 Audio"))[:1024]
+            header = support_customer_header(tg_user, db_user, "🎵 Audio")
+            cap = (header + (caption or "Audio received"))[:1024]
             sent = await context.bot.send_audio(
                 chat_id=support_id,
                 audio=msg.audio.file_id,
@@ -704,7 +907,8 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
             message_type = "audio"
 
         elif msg.animation:
-            cap = (header + (caption or "🎞 Animation"))[:1024]
+            header = support_customer_header(tg_user, db_user, "🎞 Animation")
+            cap = (header + (caption or "Animation received"))[:1024]
             sent = await context.bot.send_animation(
                 chat_id=support_id,
                 animation=msg.animation.file_id,
@@ -714,9 +918,10 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
             message_type = "animation"
 
         elif msg.sticker:
+            header = support_customer_header(tg_user, db_user, "🌟 Sticker")
             info = await context.bot.send_message(
                 chat_id=support_id,
-                text=header + "🌟 Sticker",
+                text=header + "Sticker received below.",
                 reply_markup=support_buttons(user_id),
             )
             support_store_message(info.message_id, user_id, "sticker_info")
@@ -727,9 +932,10 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
             message_type = "sticker"
 
         else:
+            header = support_customer_header(tg_user, db_user, "📨 Unsupported Message")
             info = await context.bot.send_message(
                 chat_id=support_id,
-                text=header + "📨 Unsupported message type. Copied below if possible.",
+                text=header + "Unsupported message type. Copied below if possible.",
                 reply_markup=support_buttons(user_id),
             )
             support_store_message(info.message_id, user_id, "unsupported_info")
@@ -742,10 +948,7 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
 
         if sent:
             support_store_message(sent.message_id, user_id, message_type)
-            try:
-                await msg.reply_text("✅ Customer service received your message.")
-            except Exception:
-                pass
+            support_touch_ticket(user_id, status="open", last_group_message_id=sent.message_id)
             return True
 
     except Exception as e:
@@ -790,8 +993,14 @@ async def support_group_reply_handler(update: Update, context: ContextTypes.DEFA
             from_chat_id=msg.chat_id,
             message_id=msg.message_id,
         )
+        support_touch_ticket(
+            target_user_id,
+            status="replied",
+            assigned_to=update.effective_user.id,
+            assigned_name=update.effective_user.full_name,
+        )
         try:
-            await msg.reply_text(f"✅ Sent to customer {target_user_id}")
+            await msg.reply_text("✅ Sent")
         except Exception:
             pass
         audit_log(update.effective_user.id, "support_reply", f"target={target_user_id}")
@@ -818,6 +1027,7 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
             return
 
         target_user_id = str(target_user_id).strip()
+
         if action == "sup_profile":
             await query.message.reply_text(support_profile_text(target_user_id))
 
@@ -827,6 +1037,58 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
         elif action == "sup_phone":
             row = get_user(target_user_id) or {}
             await query.message.reply_text(row.get("phone_number") or "Not Verified")
+
+        elif action == "sup_assign":
+            support_touch_ticket(
+                target_user_id,
+                status=None,
+                assigned_to=query.from_user.id,
+                assigned_name=query.from_user.full_name,
+            )
+            await query.message.reply_text(
+                "👤 Assigned\n\n"
+                f"Customer: {target_user_id}\n"
+                f"Assigned to: {query.from_user.full_name}"
+            )
+            audit_log(query.from_user.id, "support_assign", f"target={target_user_id}")
+
+        elif action.startswith("sup_status_"):
+            status = action.replace("sup_status_", "", 1)
+            priority = "urgent" if status == "urgent" else ""
+            final_status = "open" if status == "urgent" else status
+            support_touch_ticket(
+                target_user_id,
+                status=final_status,
+                assigned_to=query.from_user.id if final_status in ["replied", "done"] else None,
+                assigned_name=query.from_user.full_name if final_status in ["replied", "done"] else None,
+                priority=priority,
+            )
+            label = SUPPORT_STATUS_LABELS.get(status, status)
+            await query.message.reply_text(
+                "📌 Ticket Updated\n\n"
+                f"Customer: {target_user_id}\n"
+                f"Status: {label}\n"
+                f"By: {query.from_user.full_name}"
+            )
+            audit_log(query.from_user.id, "support_status", f"target={target_user_id} status={status}")
+
+        elif action in SUPPORT_QUICK_REPLIES:
+            label, reply_text = SUPPORT_QUICK_REPLIES[action]
+            await support_send_text_to_customer(
+                context,
+                target_user_id,
+                reply_text,
+                admin_id=query.from_user.id,
+                action=action,
+            )
+            new_status = "done" if action == "sup_qr_done" else "replied"
+            support_touch_ticket(
+                target_user_id,
+                status=new_status,
+                assigned_to=query.from_user.id,
+                assigned_name=query.from_user.full_name,
+            )
+            await query.message.reply_text(f"✅ Quick reply sent: {label}")
 
         elif action == "sup_ban":
             set_user_banned(target_user_id, True)
@@ -853,6 +1115,11 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
         else:
             await query.message.reply_text("⚠️ Unknown support button.")
 
+    except Forbidden:
+        try:
+            await query.message.reply_text("❌ Customer blocked the bot or cannot receive messages.")
+        except Exception:
+            pass
     except Exception as e:
         logger.exception("handle_support_callback failed: %s", e)
         try:
@@ -2416,9 +2683,10 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_phone_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handles users who type their phone number manually instead of pressing the
-    Telegram contact-share button. Manual text cannot prove ownership, so we
-    guide them back to the proper Verify Malaysia Number button.
+    Handles private text messages.
+    - Verified users: relay directly to customer service.
+    - Unverified users: normal questions can still reach customer service.
+    - Manual phone numbers are still rejected because typed numbers cannot prove ownership.
     """
     try:
         if not update.effective_user or not update.effective_message:
@@ -2428,16 +2696,29 @@ async def text_phone_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         user_name = update.effective_user.first_name or "User"
         ensure_user(user_id, user_name)
 
-        if is_phone_verified(user_id):
-            await relay_customer_to_support(update, context)
+        if is_user_banned(user_id) and not is_admin(user_id):
             return
 
         text = (update.effective_message.text or "").strip()
         if not text:
             return
 
-        # Any typed message before verification should guide the user to share
-        # Telegram contact. This covers typed numbers like 013xxxxxxx.
+        if is_phone_verified(user_id):
+            await relay_customer_to_support(update, context)
+            return
+
+        # Typed numbers cannot verify ownership. Keep verification secure.
+        if re.fullmatch(r"\+?\d[\d\s\-()]{6,}", text):
+            await update.effective_message.reply_text(
+                tr(user_id, "verify_manual_phone_reject"),
+                reply_markup=get_verify_keyboard(user_id),
+            )
+            return
+
+        # Let unverified users contact support too. Some users need help because they cannot verify.
+        if await relay_customer_to_support(update, context):
+            return
+
         await update.effective_message.reply_text(
             tr(user_id, "verify_manual_phone_reject"),
             reply_markup=get_verify_keyboard(user_id),
@@ -2768,7 +3049,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(query, get_language_text(), get_language_keyboard())
             return
 
-        if not is_admin(user_id) and safe_int(user.get("phone_verified", 0)) != 1:
+        if not is_admin(user_id) and safe_int(user.get("phone_verified", 0)) != 1 and data != "support":
             await safe_reply(
                 query,
 tr(user_id, "must_verify")
@@ -3119,7 +3400,7 @@ tr(user_id, "must_verify")
             await safe_edit(query, tr(user_id, "community_text"), keyboard)
 
         elif data == "support":
-            await safe_edit(query, tr(user_id, "support_text", url=SUPPORT_URL), kb_back_home(user_id))
+            await safe_edit(query, support_intro_text(user_id), kb_back_home(user_id))
 
         elif data == "back":
             await safe_edit(query, get_main_text(user_id), get_main_keyboard(user_id))
@@ -3651,6 +3932,14 @@ async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("chatid_cmd failed: %s", e)
 
 
+async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = str(update.effective_user.id) if update.effective_user else None
+        await update.effective_message.reply_text(support_intro_text(user_id))
+    except Exception as e:
+        logger.exception("support_cmd error: %s", e)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled Telegram error: %s", context.error)
 
@@ -3671,6 +3960,7 @@ def build_app():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("chatid", chatid_cmd))
+    app.add_handler(CommandHandler("support", support_cmd))
     app.add_handler(MessageHandler(filters.CONTACT & filters.ChatType.PRIVATE, contact_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_phone_handler))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, customer_private_media_handler))
