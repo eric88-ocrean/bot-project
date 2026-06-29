@@ -1667,6 +1667,913 @@ async def support_recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.effective_message.reply_text(msg)
 
 
+def set_user_language(user_id, language):
+    lang = str(language or "ms").lower()
+    if lang not in ["ms", "en", "zh"]:
+        lang = "ms"
+    db_execute("UPDATE users SET language=%s WHERE user_id=%s", (lang, str(user_id)))
+
+
+def get_user_language(user_id) -> str:
+    try:
+        user = get_user(user_id)
+        lang = (user or {}).get("language") or "ms"
+        return lang if lang in ["ms", "en", "zh"] else "ms"
+    except Exception:
+        return "ms"
+
+
+def normalize_phone(phone: str) -> str:
+    phone = (phone or "").strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    if phone.startswith("00"):
+        phone = "+" + phone[2:]
+    elif phone.startswith("60"):
+        phone = "+" + phone
+    elif phone.startswith("0"):
+        phone = "+6" + phone
+    return phone
+
+
+def is_phone_verified(user_id) -> bool:
+    user = get_user(user_id)
+    return bool(user and safe_int(user.get("phone_verified", 0)) == 1)
+
+
+def get_verify_keyboard():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 Verify Malaysia Number", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder="Tap to verify your number",
+    )
+
+
+def get_verified_phones(limit=300):
+    return db_fetchall("""
+        SELECT user_id, name, phone_number, phone_verified_at, created_at
+        FROM users
+        WHERE phone_verified=1 AND phone_number <> ''
+        ORDER BY phone_verified_at DESC, created_at DESC
+        LIMIT %s
+    """, (int(limit),))
+
+
+def create_user(user_id, name, referrer_id=None):
+    db_execute("""
+        INSERT INTO users
+        (user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id,
+         mission_claimed, last_lucky_claim, last_vip_claim, last_elite_claim,
+         checkin_streak, last_checkin_at, last_checkin_reminder_at, last_seen_at, created_at)
+        VALUES (%s,%s,0,0,0,0,%s,0,'','','',0,'','',%s,%s)
+        ON CONFLICT (user_id) DO UPDATE SET
+            name = EXCLUDED.name,
+            last_seen_at = EXCLUDED.last_seen_at
+    """, (str(user_id), name or "User", referrer_id, now_iso(), now_iso()))
+
+
+def ensure_user(user_id, name="User"):
+    user = get_user(user_id)
+    if user:
+        try:
+            db_execute("UPDATE users SET name=%s, last_seen_at=%s WHERE user_id=%s", (name or "User", now_iso(), str(user_id)))
+        except Exception:
+            pass
+        return user
+
+    create_user(str(user_id), name or "User")
+    user = get_user(user_id)
+    if not user:
+        raise RuntimeError(f"Could not create/fetch user {user_id}")
+    return user
+
+
+def add_points(user_id, amount):
+    amount = safe_int(amount)
+    db_execute("""
+        UPDATE users
+        SET points = GREATEST(points + %s, 0)
+        WHERE user_id=%s
+    """, (amount, str(user_id)))
+
+
+def set_points(user_id, points):
+    db_execute("UPDATE users SET points=%s WHERE user_id=%s", (max(safe_int(points), 0), str(user_id)))
+
+
+def add_invite(referrer_id):
+    db_execute("""
+        UPDATE users
+        SET invited_count = invited_count + 1,
+            points = points + 1
+        WHERE user_id=%s
+    """, (str(referrer_id),))
+
+
+def reward_referrer_if_needed(new_user_id: str):
+    """Credit referral only after Malaysia phone verification, once per user."""
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(new_user_id),))
+            user = cur.fetchone()
+            if not user:
+                conn.rollback()
+                return
+
+            referrer_id = user.get("referrer_id")
+            if not referrer_id or referrer_id == str(new_user_id):
+                conn.rollback()
+                return
+
+            if safe_int(user.get("invite_rewarded", 0)) == 1:
+                conn.rollback()
+                return
+
+            cur.execute("""
+                UPDATE users
+                SET invited_count = invited_count + 1,
+                    points = points + 1
+                WHERE user_id=%s
+            """, (str(referrer_id),))
+
+            cur.execute("UPDATE users SET invite_rewarded=1 WHERE user_id=%s", (str(new_user_id),))
+
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(referrer_id), "invite_rewarded_after_phone_verify", f"new_user={new_user_id}", now_iso()),
+            )
+
+        conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.warning("reward_referrer_if_needed failed: %s", e)
+    finally:
+        put_conn(conn)
+
+
+def get_top_invites():
+    return db_fetchall("""
+        SELECT name, points, invited_count
+        FROM users
+        ORDER BY invited_count DESC, points DESC
+        LIMIT 10
+    """)
+
+
+def get_all_users():
+    return db_fetchall("""
+        SELECT
+            u.user_id,
+            u.name,
+            u.points,
+            u.invited_count,
+            u.phone_number,
+            u.phone_verified,
+            COALESCE(u.checkin_streak, 0) AS checkin_streak,
+            COALESCE(u.last_checkin_at, '') AS last_checkin_at,
+            COALESCE(dm.rm100_count, 0) AS rm100_count,
+            COALESCE(dm.rm300_count, 0) AS rm300_count
+        FROM users u
+        LEFT JOIN (
+            SELECT
+                user_id,
+                SUM(CASE WHEN deposit_amount=100 AND status='approved' THEN 1 ELSE 0 END) AS rm100_count,
+                SUM(CASE WHEN deposit_amount=300 AND status='approved' THEN 1 ELSE 0 END) AS rm300_count
+            FROM deposit_mission_requests
+            GROUP BY user_id
+        ) dm ON dm.user_id = u.user_id
+        ORDER BY u.invited_count DESC, u.points DESC
+    """)
+
+
+def get_stats():
+    return db_fetchone("""
+        SELECT
+            COUNT(*) AS total_users,
+            COALESCE(SUM(points),0) AS total_points,
+            COALESCE(SUM(invited_count),0) AS total_invites,
+            COALESCE(SUM(CASE WHEN gift_claimed=1 THEN 1 ELSE 0 END),0) AS gifts_claimed
+        FROM users
+    """)
+
+
+def get_pending_redeems(limit=20):
+    return db_fetchall("""
+        SELECT * FROM redeem_requests
+        WHERE status='pending'
+        ORDER BY id DESC
+        LIMIT %s
+    """, (int(limit),))
+
+
+def get_pending_gifts(limit=20):
+    return db_fetchall("""
+        SELECT * FROM gift_requests
+        WHERE status='pending'
+        ORDER BY id DESC
+        LIMIT %s
+    """, (int(limit),))
+
+
+def get_pending_deposit_missions(limit=20):
+    return db_fetchall("""
+        SELECT * FROM deposit_mission_requests
+        WHERE status='pending'
+        ORDER BY id DESC
+        LIMIT %s
+    """, (int(limit),))
+
+
+def update_user_checkin_after_claim(cur, user):
+    """Update check-in streak when a daily reward is successfully claimed."""
+    today = today_str()
+    yesterday = (now_my() - timedelta(days=1)).strftime("%Y-%m-%d")
+    last_checkin = (user.get("last_checkin_at") or "")[:10]
+
+    if last_checkin == today:
+        new_streak = safe_int(user.get("checkin_streak", 0))
+    elif last_checkin == yesterday:
+        new_streak = safe_int(user.get("checkin_streak", 0)) + 1
+    else:
+        new_streak = 1
+
+    cur.execute(
+        """
+        UPDATE users
+        SET checkin_streak=%s,
+            last_checkin_at=%s
+        WHERE user_id=%s
+        """,
+        (new_streak, now_iso(), str(user.get("user_id"))),
+    )
+    return new_streak
+
+
+def get_users_for_checkin_reminder():
+    """Users who have not checked in recently. Gentle push: max once every few days."""
+    today = today_str()
+    inactive_cutoff = (now_my() - timedelta(days=2)).strftime("%Y-%m-%d")
+    push_cutoff = (now_my() - timedelta(days=CHECKIN_PUSH_COOLDOWN_DAYS)).isoformat(timespec="seconds")
+
+    return db_fetchall("""
+        SELECT user_id, name, language, last_checkin_at, last_checkin_push_at
+        FROM users
+        WHERE phone_verified=1
+          AND (
+                COALESCE(last_checkin_push_at, '') = ''
+             OR last_checkin_push_at <= %s
+          )
+          AND (
+                (COALESCE(last_checkin_at, '') = '' AND LEFT(COALESCE(created_at, ''), 10) <= %s)
+             OR (COALESCE(last_checkin_at, '') <> '' AND LEFT(last_checkin_at, 10) <= %s)
+          )
+        ORDER BY COALESCE(last_checkin_push_at, '') ASC, last_checkin_at ASC
+        LIMIT %s
+    """, (push_cutoff, inactive_cutoff, inactive_cutoff, PUSH_MAX_PER_RUN))
+
+
+def get_users_for_share_reminder():
+    """Users who can benefit from Share & Earn reminder. Gentle push: max once a week."""
+    push_cutoff = (now_my() - timedelta(days=SHARE_PUSH_COOLDOWN_DAYS)).isoformat(timespec="seconds")
+    created_cutoff = (now_my() - timedelta(days=2)).strftime("%Y-%m-%d")
+
+    return db_fetchall("""
+        SELECT user_id, name, language, invited_count, last_share_push_at
+        FROM users
+        WHERE phone_verified=1
+          AND LEFT(COALESCE(created_at, ''), 10) <= %s
+          AND COALESCE(invited_count, 0) < 20
+          AND (
+                COALESCE(last_share_push_at, '') = ''
+             OR last_share_push_at <= %s
+          )
+        ORDER BY COALESCE(last_share_push_at, '') ASC, invited_count ASC
+        LIMIT %s
+    """, (created_cutoff, push_cutoff, PUSH_MAX_PER_RUN))
+
+
+def mark_checkin_reminder_sent(user_id):
+    # Keep old column updated for compatibility, and use the new dedicated push column.
+    db_execute(
+        "UPDATE users SET last_checkin_reminder_at=%s, last_checkin_push_at=%s WHERE user_id=%s",
+        (now_iso(), now_iso(), str(user_id)),
+    )
+
+
+def mark_share_reminder_sent(user_id):
+    db_execute("UPDATE users SET last_share_push_at=%s WHERE user_id=%s", (now_iso(), str(user_id)))
+
+
+def checkin_reminder_text(lang):
+    lang = lang if lang in ["ms", "en", "zh"] else "ms"
+    if lang == "zh":
+        return "🎁 Boss，今天的 Check In 还没领取哦。\n\n回来按一下，继续收集 Reward Points 🔥"
+    if lang == "en":
+        return "🎁 Boss, your Check In reward is waiting.\n\nCome back and continue collecting Reward Points 🔥"
+    return "🎁 Boss, Check In reward anda sedang tunggu.\n\nJom masuk balik dan terus kumpul Reward Points 🔥"
+
+
+def share_reminder_text(lang, user_id):
+    link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+    lang = lang if lang in ["ms", "en", "zh"] else "ms"
+    if lang == "zh":
+        return (
+            "💰 Share & Earn 提醒\n\n"
+            "Boss，分享你的专属 link 给朋友，朋友验证后你就可以继续累积 Reward Points 🔥\n\n"
+            f"🔗 你的邀请链接:\n{link}"
+        )
+    if lang == "en":
+        return (
+            "💰 Share & Earn reminder\n\n"
+            "Boss, share your personal link with friends. When they verify, you can collect more Reward Points 🔥\n\n"
+            f"🔗 Your invite link:\n{link}"
+        )
+    return (
+        "💰 Share & Earn reminder\n\n"
+        "Boss, share link anda kepada kawan. Bila mereka verify, anda boleh kumpul lebih banyak Reward Points 🔥\n\n"
+        f"🔗 Link Boss:\n{link}"
+    )
+
+
+def checkin_push_keyboard(user_id):
+    # Push reminder button should match the main menu wording: 🎁 Check In.
+    # Customer taps this and goes directly to the Check In / Daily Reward page.
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(user_id, "checkin"), callback_data="reward_center")],
+    ])
+
+
+def share_push_keyboard(user_id):
+    # Push reminder button should match the rewards menu wording: 💰 Share & Earn.
+    # Customer taps this and goes directly to their referral/share page inside the bot.
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(user_id, "share_earn_btn"), callback_data="link")],
+    ])
+
+
+def broadcast_share_earn_keyboard():
+    """Inline buttons for promotional broadcasts.
+
+    Button 1 sends a new Share & Earn page through callback_data="broadcast_share" so the broadcast message stays unchanged.
+    Button 2 opens Customer Service for screenshot claim.
+    """
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Share Kepada Kawan", callback_data="broadcast_share")],
+        [InlineKeyboardButton("🎧 Screenshot Kepada Customer Service", url=SUPPORT_URL)],
+    ])
+
+
+# ================= TRANSACTION FLOWS =================
+
+def claim_daily_reward(user_id: str, reward_type: str, min_invites: int, reward_pool) -> Tuple[bool, str]:
+    """Locked transaction to stop double claim from double-click/spam."""
+    today = today_str()
+    column_map = {
+        "lucky": "last_lucky_claim",
+        "vip": "last_vip_claim",
+        "elite": "last_elite_claim",
+    }
+    title_map = {
+        "lucky": "Lucky Reward",
+        "vip": "VIP Reward",
+        "elite": "Elite Reward",
+    }
+    column = column_map.get(reward_type)
+    if not column:
+        return False, "⚠️ Invalid reward type."
+
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
+            user = cur.fetchone()
+            if not user:
+                conn.rollback()
+                return False, "⚠️ User not found. Please press /start again."
+
+            if not is_admin(user_id):
+                if (
+                    user.get("last_lucky_claim") == today or
+                    user.get("last_vip_claim") == today or
+                    user.get("last_elite_claim") == today
+                ):
+                    conn.rollback()
+                    return False, tr(user_id, "daily_claimed")
+
+                if safe_int(user.get("invited_count", 0)) < min_invites:
+                    conn.rollback()
+                    return False, tr(user_id, "unlock_invites", title=title_map[reward_type], invites=min_invites)
+
+            reward = random_reward(reward_pool)
+            cur.execute(
+                f"UPDATE users SET {column}=%s, points=GREATEST(points + %s, 0) WHERE user_id=%s",
+                (today, int(reward), str(user_id)),
+            )
+
+            new_streak = update_user_checkin_after_claim(cur, user)
+
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(user_id), f"claim_{reward_type}", f"reward={reward}; checkin_streak={new_streak}", now_iso()),
+            )
+
+        conn.commit()
+
+        if reward > 0:
+            return True, tr(user_id, "reward_win", reward=reward)
+        return True, tr(user_id, "reward_zero")
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("claim_daily_reward error: %s", e)
+        return False, "⚠️ Reward system busy. Please try again."
+    finally:
+        put_conn(conn)
+
+
+def claim_mission_reward(user_id: str) -> Tuple[bool, str]:
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
+            user = cur.fetchone()
+            if not user:
+                conn.rollback()
+                return False, "⚠️ User not found. Please press /start again."
+
+            if safe_int(user.get("mission_claimed", 0)) == 1 and not is_admin(user_id):
+                conn.rollback()
+                return False, tr(user_id, "mission_claimed")
+
+            cur.execute("UPDATE users SET points=points+2, mission_claimed=1 WHERE user_id=%s", (str(user_id),))
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(user_id), "mission_claim", "+2 points", now_iso()),
+            )
+        conn.commit()
+        return True, tr(user_id, "mission_completed")
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("claim_mission_reward error: %s", e)
+        return False, "⚠️ Mission system busy. Please try again."
+    finally:
+        put_conn(conn)
+
+
+def create_redeem_request_locked(user_id, username, reward_text, points_needed) -> Tuple[bool, str, Optional[int]]:
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
+            user = cur.fetchone()
+            if not user:
+                conn.rollback()
+                return False, "⚠️ User not found. Please press /start again.", None
+
+            if safe_int(user.get("points", 0)) < int(points_needed) and not is_admin(user_id):
+                conn.rollback()
+                return False, tr(user_id, "not_enough_text"), None
+
+            cur.execute("""
+                SELECT id FROM redeem_requests
+                WHERE user_id=%s AND reward_text=%s AND status='pending'
+                LIMIT 1
+            """, (str(user_id), reward_text))
+            pending = cur.fetchone()
+            if pending:
+                conn.rollback()
+                return False, tr(user_id, "redeem_pending"), pending["id"]
+
+            cur.execute("""
+                INSERT INTO redeem_requests
+                (user_id, username, reward_text, points_needed, status, created_at)
+                VALUES (%s,%s,%s,%s,'pending',%s)
+                RETURNING id
+            """, (str(user_id), username, reward_text, int(points_needed), now_iso()))
+            row = cur.fetchone()
+            request_id = row["id"]
+
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(user_id), "redeem_request", f"{reward_text} / {points_needed} points / id={request_id}", now_iso()),
+            )
+
+        conn.commit()
+        return True, tr(user_id, "redeem_submitted"), request_id
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("create_redeem_request_locked error: %s", e)
+        return False, "⚠️ Redeem system busy. Please try again.", None
+    finally:
+        put_conn(conn)
+
+
+def approve_redeem_request(request_id, admin_id) -> Tuple[bool, str, Optional[str], str]:
+    conn = None
+    target_user = None
+    reward_text = ""
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM redeem_requests WHERE id=%s FOR UPDATE", (int(request_id),))
+            req = cur.fetchone()
+            if not req:
+                conn.rollback()
+                return False, "❌ Redeem request not found.", None, ""
+
+            target_user = req["user_id"]
+            reward_text = req["reward_text"]
+
+            if req["status"] != "pending":
+                conn.rollback()
+                return False, f"⚠️ This request was already {req['status']}.", target_user, reward_text
+
+            cur.execute("""
+                UPDATE users
+                SET points = points - %s
+                WHERE user_id=%s AND points >= %s
+                RETURNING points
+            """, (req["points_needed"], req["user_id"], req["points_needed"]))
+            updated = cur.fetchone()
+            if not updated:
+                conn.rollback()
+                return False, "❌ User does not have enough points now. Approval cancelled.", target_user, reward_text
+
+            cur.execute("""
+                UPDATE redeem_requests
+                SET status='approved', processed_at=%s, processed_by=%s
+                WHERE id=%s
+            """, (now_iso(), str(admin_id), int(request_id)))
+
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(admin_id), "approve_redeem", f"request={request_id} target={target_user} reward={reward_text}", now_iso()),
+            )
+        conn.commit()
+        return True, "✅ Redeem Approved.", target_user, reward_text
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("approve_redeem_request error: %s", e)
+        return False, "⚠️ Approval failed. Please check logs.", target_user, reward_text
+    finally:
+        put_conn(conn)
+
+
+def reject_redeem_request(request_id, admin_id) -> Tuple[bool, str, Optional[str], str]:
+    conn = None
+    target_user = None
+    reward_text = ""
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM redeem_requests WHERE id=%s FOR UPDATE", (int(request_id),))
+            req = cur.fetchone()
+            if not req:
+                conn.rollback()
+                return False, "❌ Redeem request not found.", None, ""
+
+            target_user = req["user_id"]
+            reward_text = req["reward_text"]
+
+            if req["status"] != "pending":
+                conn.rollback()
+                return False, f"⚠️ This request was already {req['status']}.", target_user, reward_text
+
+            cur.execute("""
+                UPDATE redeem_requests
+                SET status='rejected', processed_at=%s, processed_by=%s
+                WHERE id=%s
+            """, (now_iso(), str(admin_id), int(request_id)))
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(admin_id), "reject_redeem", f"request={request_id} target={target_user} reward={reward_text}", now_iso()),
+            )
+        conn.commit()
+        return True, "❌ Redeem Rejected.", target_user, reward_text
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("reject_redeem_request error: %s", e)
+        return False, "⚠️ Reject failed. Please check logs.", target_user, reward_text
+    finally:
+        put_conn(conn)
+
+
+def create_gift_request_locked(user_id, username) -> Tuple[bool, str, Optional[int]]:
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
+            user = cur.fetchone()
+            if not user:
+                conn.rollback()
+                return False, "⚠️ User not found. Please press /start again.", None
+
+            if safe_int(user.get("gift_claimed", 0)) == 1 and not is_admin(user_id):
+                conn.rollback()
+                return False, tr(user_id, "gift_claimed"), None
+
+            cur.execute("SELECT id FROM gift_requests WHERE user_id=%s AND status='pending' LIMIT 1", (str(user_id),))
+            pending = cur.fetchone()
+            if pending:
+                conn.rollback()
+                return False, tr(user_id, "gift_pending"), pending["id"]
+
+            cur.execute("""
+                INSERT INTO gift_requests (user_id, username, status, created_at)
+                VALUES (%s,%s,'pending',%s)
+                RETURNING id
+            """, (str(user_id), username, now_iso()))
+            row = cur.fetchone()
+            request_id = row["id"]
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(user_id), "gift_request", f"id={request_id}", now_iso()),
+            )
+        conn.commit()
+        return True, tr(user_id, "gift_submitted"), request_id
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("create_gift_request_locked error: %s", e)
+        return False, "⚠️ Gift system busy. Please try again.", None
+    finally:
+        put_conn(conn)
+
+
+
+def create_deposit_mission_request_locked(user_id, username, deposit_amount, reward_points) -> Tuple[bool, str, Optional[int]]:
+    """User submits a daily deposit mission for admin review. Points are added only after admin approval."""
+    deposit_amount = safe_int(deposit_amount)
+    reward_points = safe_int(reward_points)
+    if deposit_amount not in [100, 300] or reward_points not in [2, 5]:
+        return False, tr(user_id, "deposit_invalid"), None
+
+    today = today_str()
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
+            user = cur.fetchone()
+            if not user:
+                conn.rollback()
+                return False, "⚠️ User not found. Please press /start again.", None
+
+            # One pending request per user is enough. It prevents spam while admin is reviewing.
+            cur.execute("""
+                SELECT id FROM deposit_mission_requests
+                WHERE user_id=%s AND status='pending'
+                LIMIT 1
+            """, (str(user_id),))
+            pending = cur.fetchone()
+            if pending:
+                conn.rollback()
+                return False, tr(user_id, "deposit_pending"), pending["id"]
+
+            # Do not allow the same tier to be approved more than once per Malaysia day.
+            cur.execute("""
+                SELECT id FROM deposit_mission_requests
+                WHERE user_id=%s AND deposit_amount=%s AND status='approved' AND created_at LIKE %s
+                LIMIT 1
+            """, (str(user_id), deposit_amount, today + "%"))
+            approved_today = cur.fetchone()
+            if approved_today and not is_admin(user_id):
+                conn.rollback()
+                return False, tr(user_id, "deposit_already_claimed"), approved_today["id"]
+
+            cur.execute("""
+                INSERT INTO deposit_mission_requests
+                (user_id, username, deposit_amount, reward_points, status, created_at)
+                VALUES (%s,%s,%s,%s,'pending',%s)
+                RETURNING id
+            """, (str(user_id), username, deposit_amount, reward_points, now_iso()))
+            row = cur.fetchone()
+            request_id = row["id"]
+
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(user_id), "deposit_mission_request", f"deposit=RM{deposit_amount} reward=+{reward_points} id={request_id}", now_iso()),
+            )
+
+        conn.commit()
+        return True, tr(user_id, "deposit_submitted"), request_id
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("create_deposit_mission_request_locked error: %s", e)
+        return False, "⚠️ Deposit mission system busy. Please try again.", None
+    finally:
+        put_conn(conn)
+
+
+def approve_deposit_mission_request(request_id, admin_id) -> Tuple[bool, str, Optional[str], int, int]:
+    conn = None
+    target_user = None
+    deposit_amount = 0
+    reward_points = 0
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM deposit_mission_requests WHERE id=%s FOR UPDATE", (int(request_id),))
+            req = cur.fetchone()
+            if not req:
+                conn.rollback()
+                return False, "❌ Deposit mission request not found.", None, 0, 0
+
+            target_user = req["user_id"]
+            deposit_amount = safe_int(req.get("deposit_amount"))
+            reward_points = safe_int(req.get("reward_points"))
+
+            if req["status"] != "pending":
+                conn.rollback()
+                return False, f"⚠️ This request was already {req['status']}.", target_user, deposit_amount, reward_points
+
+            cur.execute("UPDATE users SET points=points+%s WHERE user_id=%s", (reward_points, str(target_user)))
+            cur.execute("""
+                UPDATE deposit_mission_requests
+                SET status='approved', processed_at=%s, processed_by=%s
+                WHERE id=%s
+            """, (now_iso(), str(admin_id), int(request_id)))
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(admin_id), "approve_deposit_mission", f"request={request_id} target={target_user} RM{deposit_amount} +{reward_points}", now_iso()),
+            )
+        conn.commit()
+        return True, f"✅ Deposit Mission Approved. +{reward_points} points added.", target_user, deposit_amount, reward_points
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("approve_deposit_mission_request error: %s", e)
+        return False, "⚠️ Deposit mission approval failed.", target_user, deposit_amount, reward_points
+    finally:
+        put_conn(conn)
+
+
+def reject_deposit_mission_request(request_id, admin_id) -> Tuple[bool, str, Optional[str], int, int]:
+    conn = None
+    target_user = None
+    deposit_amount = 0
+    reward_points = 0
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM deposit_mission_requests WHERE id=%s FOR UPDATE", (int(request_id),))
+            req = cur.fetchone()
+            if not req:
+                conn.rollback()
+                return False, "❌ Deposit mission request not found.", None, 0, 0
+
+            target_user = req["user_id"]
+            deposit_amount = safe_int(req.get("deposit_amount"))
+            reward_points = safe_int(req.get("reward_points"))
+
+            if req["status"] != "pending":
+                conn.rollback()
+                return False, f"⚠️ This request was already {req['status']}.", target_user, deposit_amount, reward_points
+
+            cur.execute("""
+                UPDATE deposit_mission_requests
+                SET status='rejected', processed_at=%s, processed_by=%s
+                WHERE id=%s
+            """, (now_iso(), str(admin_id), int(request_id)))
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(admin_id), "reject_deposit_mission", f"request={request_id} target={target_user} RM{deposit_amount} +{reward_points}", now_iso()),
+            )
+        conn.commit()
+        return True, "❌ Deposit Mission Rejected.", target_user, deposit_amount, reward_points
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("reject_deposit_mission_request error: %s", e)
+        return False, "⚠️ Deposit mission reject failed.", target_user, deposit_amount, reward_points
+    finally:
+        put_conn(conn)
+
+
+def approve_gift_request(target_user_id, admin_id) -> Tuple[bool, str, Optional[str]]:
+    """
+    Approve RM38 game credit request
+    WITHOUT adding Telegram reward points
+    """
+    conn = None
+
+    try:
+        conn = get_conn()
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+            cur.execute(
+                "SELECT * FROM users WHERE user_id=%s FOR UPDATE",
+                (str(target_user_id),)
+            )
+
+            user = cur.fetchone()
+
+            if not user:
+                conn.rollback()
+                return False, "❌ User not found.", None
+
+            if safe_int(user.get("gift_claimed", 0)) == 1:
+                conn.rollback()
+                return False, "⚠️ Gift already approved before.", str(target_user_id)
+
+            cur.execute("""
+                SELECT * FROM gift_requests
+                WHERE user_id=%s AND status='pending'
+                ORDER BY id DESC
+                LIMIT 1
+                FOR UPDATE
+            """, (str(target_user_id),))
+
+            gift_req = cur.fetchone()
+
+            # ONLY mark as claimed
+            # DO NOT ADD REWARD POINTS
+            cur.execute("""
+                UPDATE users
+                SET gift_claimed=1
+                WHERE user_id=%s
+            """, (str(target_user_id),))
+
+            if gift_req:
+                cur.execute("""
+                    UPDATE gift_requests
+                    SET status='approved', processed_at=%s, processed_by=%s
+                    WHERE id=%s
+                """, (now_iso(), str(admin_id), gift_req["id"]))
+
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (
+                    str(admin_id),
+                    "approve_gift",
+                    f"target={target_user_id} RM38_GAME_CREDIT",
+                    now_iso(),
+                ),
+            )
+
+        conn.commit()
+
+        return True, "✅ Gift Approved. RM38 game credit confirmed.", str(target_user_id)
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        logger.exception("approve_gift_request error: %s", e)
+
+        return False, "⚠️ Gift approval failed.", str(target_user_id)
+
+    finally:
+        put_conn(conn)
+
+
+def reject_gift_request(target_user_id, admin_id) -> Tuple[bool, str, Optional[str]]:
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT * FROM gift_requests
+                WHERE user_id=%s AND status='pending'
+                ORDER BY id DESC
+                LIMIT 1
+                FOR UPDATE
+            """, (str(target_user_id),))
+            req = cur.fetchone()
+            if req:
+                cur.execute("""
+                    UPDATE gift_requests
+                    SET status='rejected', processed_at=%s, processed_by=%s
+                    WHERE id=%s
+                """, (now_iso(), str(admin_id), req["id"]))
+            cur.execute(
+                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
+                (str(admin_id), "reject_gift", f"target={target_user_id}", now_iso()),
+            )
+        conn.commit()
+        return True, "❌ Gift Rejected.", str(target_user_id)
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.exception("reject_gift_request error: %s", e)
+        return False, "⚠️ Gift reject failed. Please check logs.", str(target_user_id)
+    finally:
+        put_conn(conn)
+
+
 # ================= UI / LANGUAGE =================
 
 TEXT = {
