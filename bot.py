@@ -373,6 +373,8 @@ def init_db():
                     assigned_name TEXT DEFAULT '',
                     priority TEXT DEFAULT '',
                     last_group_message_id BIGINT DEFAULT 0,
+                    closed_at TEXT DEFAULT '',
+                    closed_by TEXT DEFAULT '',
                     created_at TEXT DEFAULT '',
                     updated_at TEXT DEFAULT ''
                 )
@@ -384,11 +386,43 @@ def init_db():
                 "assigned_name TEXT DEFAULT ''",
                 "priority TEXT DEFAULT ''",
                 "last_group_message_id BIGINT DEFAULT 0",
+                "closed_at TEXT DEFAULT ''",
+                "closed_by TEXT DEFAULT ''",
                 "created_at TEXT DEFAULT ''",
                 "updated_at TEXT DEFAULT ''",
             ]
             for col in support_ticket_columns:
                 cur.execute(f"ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS {col}")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS support_chat_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT,
+                    direction TEXT DEFAULT '',
+                    message_type TEXT DEFAULT '',
+                    content TEXT DEFAULT '',
+                    group_message_id BIGINT DEFAULT 0,
+                    customer_message_id BIGINT DEFAULT 0,
+                    admin_id TEXT DEFAULT '',
+                    admin_name TEXT DEFAULT '',
+                    is_recalled INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT ''
+                )
+            """)
+
+            support_log_columns = [
+                "direction TEXT DEFAULT ''",
+                "message_type TEXT DEFAULT ''",
+                "content TEXT DEFAULT ''",
+                "group_message_id BIGINT DEFAULT 0",
+                "customer_message_id BIGINT DEFAULT 0",
+                "admin_id TEXT DEFAULT ''",
+                "admin_name TEXT DEFAULT ''",
+                "is_recalled INTEGER DEFAULT 0",
+                "created_at TEXT DEFAULT ''",
+            ]
+            for col in support_log_columns:
+                cur.execute(f"ALTER TABLE support_chat_logs ADD COLUMN IF NOT EXISTS {col}")
 
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_invites ON users(invited_count DESC)")
@@ -404,6 +438,9 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_support_messages_user ON support_messages(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(status)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_support_tickets_assigned ON support_tickets(assigned_to)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_support_logs_user ON support_chat_logs(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_support_logs_created ON support_chat_logs(created_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_support_logs_direction ON support_chat_logs(direction)")
 
         conn.commit()
         logger.info("Database initialized.")
@@ -440,6 +477,12 @@ def get_user_phone(user_id) -> str:
 
 
 # ================= CUSTOMER SERVICE RELAY =================
+
+# Short support view:
+# - Customer messages show only key info and a small action keyboard.
+# - Extra tools are hidden behind Quick Reply / More.
+# - Boss can review finished chats with /chats, /closed and /chatlog <user_id>.
+# - Bot-sent support replies can be recalled with the Recall button if Telegram still allows deletion.
 
 SUPPORT_QUICK_REPLIES = {
     "sup_qr_screen": (
@@ -520,7 +563,15 @@ def support_get_ticket(user_id):
         return None
 
 
-def support_touch_ticket(user_id, status="open", assigned_to=None, assigned_name=None, priority=None, last_group_message_id=None):
+def support_touch_ticket(
+    user_id,
+    status="open",
+    assigned_to=None,
+    assigned_name=None,
+    priority=None,
+    last_group_message_id=None,
+    closed_by=None,
+):
     """Create/update a lightweight support ticket for the customer service group."""
     try:
         current = support_get_ticket(user_id) or {}
@@ -528,19 +579,29 @@ def support_touch_ticket(user_id, status="open", assigned_to=None, assigned_name
         final_assigned_to = str(assigned_to) if assigned_to is not None else (current.get("assigned_to") or "")
         final_assigned_name = assigned_name if assigned_name is not None else (current.get("assigned_name") or "")
         final_priority = priority if priority is not None else (current.get("priority") or "")
-        final_last_group_message_id = safe_int(last_group_message_id, safe_int(current.get("last_group_message_id", 0))) if last_group_message_id is not None else safe_int(current.get("last_group_message_id", 0))
+        final_last_group_message_id = (
+            safe_int(last_group_message_id, safe_int(current.get("last_group_message_id", 0)))
+            if last_group_message_id is not None
+            else safe_int(current.get("last_group_message_id", 0))
+        )
+        final_closed_at = now_iso() if final_status == "done" else (current.get("closed_at") or "")
+        final_closed_by = str(closed_by) if closed_by is not None else (current.get("closed_by") or "")
         created_at = current.get("created_at") or now_iso()
+
         db_execute(
             """
             INSERT INTO support_tickets
-            (user_id, status, assigned_to, assigned_name, priority, last_group_message_id, created_at, updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            (user_id, status, assigned_to, assigned_name, priority, last_group_message_id,
+             closed_at, closed_by, created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (user_id) DO UPDATE SET
                 status=EXCLUDED.status,
                 assigned_to=EXCLUDED.assigned_to,
                 assigned_name=EXCLUDED.assigned_name,
                 priority=EXCLUDED.priority,
                 last_group_message_id=EXCLUDED.last_group_message_id,
+                closed_at=EXCLUDED.closed_at,
+                closed_by=EXCLUDED.closed_by,
                 updated_at=EXCLUDED.updated_at
             """,
             (
@@ -550,6 +611,8 @@ def support_touch_ticket(user_id, status="open", assigned_to=None, assigned_name
                 final_assigned_name,
                 final_priority,
                 int(final_last_group_message_id or 0),
+                final_closed_at,
+                final_closed_by,
                 created_at,
                 now_iso(),
             ),
@@ -558,28 +621,179 @@ def support_touch_ticket(user_id, status="open", assigned_to=None, assigned_name
         logger.warning("support_touch_ticket failed: %s", e)
 
 
-def support_ticket_line(user_id) -> str:
+def support_log_chat(
+    user_id,
+    direction,
+    message_type="text",
+    content="",
+    group_message_id=0,
+    customer_message_id=0,
+    admin_id="",
+    admin_name="",
+    is_recalled=0,
+):
+    """Persist a small chat transcript for boss review."""
+    try:
+        row = db_fetchone(
+            """
+            INSERT INTO support_chat_logs
+            (user_id, direction, message_type, content, group_message_id, customer_message_id,
+             admin_id, admin_name, is_recalled, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+            """,
+            (
+                str(user_id),
+                str(direction or ""),
+                str(message_type or ""),
+                str(content or "")[:2000],
+                safe_int(group_message_id, 0),
+                safe_int(customer_message_id, 0),
+                str(admin_id or ""),
+                str(admin_name or ""),
+                safe_int(is_recalled, 0),
+                now_iso(),
+            ),
+        )
+        return safe_int(row.get("id", 0)) if row else 0
+    except Exception as e:
+        logger.warning("support_log_chat failed: %s", e)
+        return 0
+
+
+def support_get_log(log_id):
+    try:
+        return db_fetchone("SELECT * FROM support_chat_logs WHERE id=%s", (int(log_id),))
+    except Exception:
+        return None
+
+
+def support_update_log_recalled(log_id):
+    try:
+        db_execute("UPDATE support_chat_logs SET is_recalled=1 WHERE id=%s", (int(log_id),))
+    except Exception as e:
+        logger.warning("support_update_log_recalled failed: %s", e)
+
+
+def support_message_preview(msg) -> Tuple[str, str]:
+    """Return (message_type, preview) for logging and group summaries."""
+    if not msg:
+        return "unknown", ""
+    if msg.text:
+        return "text", msg.text.strip()
+    if msg.caption:
+        cap = msg.caption.strip()
+    else:
+        cap = ""
+    if msg.photo:
+        return "photo", cap or "[Photo / Screenshot]"
+    if msg.document:
+        name = msg.document.file_name or ""
+        return "document", cap or f"[Document] {name}".strip()
+    if msg.video:
+        return "video", cap or "[Video]"
+    if msg.voice:
+        return "voice", "[Voice Message]"
+    if msg.audio:
+        return "audio", cap or "[Audio]"
+    if msg.animation:
+        return "animation", cap or "[Animation]"
+    if msg.sticker:
+        return "sticker", "[Sticker]"
+    return "message", cap or "[Unsupported message]"
+
+
+def support_status_short(user_id) -> str:
     ticket = support_get_ticket(user_id) or {}
     status = ticket.get("status") or "open"
-    status_label = SUPPORT_STATUS_LABELS.get(status, status)
+    return SUPPORT_STATUS_LABELS.get(status, status)
+
+
+def support_username(tg_user) -> str:
+    try:
+        return f"@{tg_user.username}" if tg_user and tg_user.username else "No Username"
+    except Exception:
+        return "No Username"
+
+
+def support_compact_header(tg_user, db_user=None, message_label="💬 Message") -> str:
+    db_user = db_user or {}
+    user_id = str(tg_user.id) if tg_user else str(db_user.get("user_id", ""))
+    phone = db_user.get("phone_number") or "Not Verified"
+    full_name = tg_user.full_name if tg_user else (db_user.get("name") or "Customer")
+    username = support_username(tg_user)
+
+    return (
+        "🟡 NEW MESSAGE\n\n"
+        f"👤 {full_name}\n"
+        f"📱 {phone}\n"
+        f"🔗 {username}\n"
+        f"🆔 {user_id}\n"
+        f"📌 {support_status_short(user_id)}\n\n"
+        "━━━━━━━━━━━━━━\n"
+        f"{message_label}:\n"
+    )
+
+
+def support_closed_summary_text(target_user_id):
+    row = get_user(target_user_id) or {}
+    ticket = support_get_ticket(target_user_id) or {}
     assigned = ticket.get("assigned_name") or "-"
-    priority = ticket.get("priority") or "Normal"
-    if priority == "urgent":
-        priority = "🔥 Urgent"
-    return f"📌 Status: {status_label}\n👤 Assigned: {assigned}\n⚡ Priority: {priority}"
+    closed_at = ticket.get("closed_at") or now_iso()
+    return (
+        "✅ CLOSED CHAT\n\n"
+        f"👤 {row.get('name') or 'Customer'}\n"
+        f"📱 {row.get('phone_number') or 'Not Verified'}\n"
+        f"🆔 {target_user_id}\n"
+        f"👤 Handled by: {assigned}\n"
+        f"🕒 Closed: {closed_at}\n\n"
+        f"老板查看记录：/chatlog {target_user_id}"
+    )
 
 
-def support_buttons(target_user_id):
+def support_intro_text(user_id=None) -> str:
+    lang = get_user_language(user_id) if user_id else "ms"
+    if lang == "zh":
+        return (
+            "🎧 JOMJUDI88 客服\n\n"
+            "请直接在这里输入你的问题，或发送 screenshot / 文件。\n"
+            "客服会尽快回复你。"
+        )
+    if lang == "en":
+        return (
+            "🎧 JOMJUDI88 Customer Service\n\n"
+            "Type your question here, or send a screenshot/file.\n"
+            "Our customer service team will reply as soon as possible."
+        )
+    return (
+        "🎧 JOMJUDI88 Customer Service\n\n"
+        "Boss, terus taip masalah anda di sini, atau hantar screenshot / file.\n"
+        "Customer service akan reply secepat mungkin."
+    )
+
+
+def support_main_buttons(target_user_id):
     target_user_id = str(target_user_id)
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("👤 Profile", callback_data=f"sup_profile:{target_user_id}"),
-            InlineKeyboardButton("⭐ Points", callback_data=f"sup_points:{target_user_id}"),
+            InlineKeyboardButton("⚡ Quick Reply", callback_data=f"sup_panel_qr:{target_user_id}"),
+            InlineKeyboardButton("🟢 Replied", callback_data=f"sup_status_replied:{target_user_id}"),
         ],
         [
-            InlineKeyboardButton("📱 Copy Phone", callback_data=f"sup_phone:{target_user_id}"),
-            InlineKeyboardButton("👤 Assign Me", callback_data=f"sup_assign:{target_user_id}"),
+            InlineKeyboardButton("📂 More", callback_data=f"sup_panel_more:{target_user_id}"),
+            InlineKeyboardButton("✅ Close", callback_data=f"sup_status_done:{target_user_id}"),
         ],
+    ])
+
+
+# Keep the old name used by other code paths, but make it the clean default keyboard.
+def support_buttons(target_user_id):
+    return support_main_buttons(target_user_id)
+
+
+def support_quick_reply_buttons(target_user_id):
+    target_user_id = str(target_user_id)
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📸 Ask Screenshot", callback_data=f"sup_qr_screen:{target_user_id}"),
             InlineKeyboardButton("🆔 Ask User ID", callback_data=f"sup_qr_userid:{target_user_id}"),
@@ -593,87 +807,141 @@ def support_buttons(target_user_id):
             InlineKeyboardButton("✅ Done Reply", callback_data=f"sup_qr_done:{target_user_id}"),
         ],
         [
-            InlineKeyboardButton("🟡 Pending", callback_data=f"sup_status_pending:{target_user_id}"),
-            InlineKeyboardButton("🟢 Replied", callback_data=f"sup_status_replied:{target_user_id}"),
+            InlineKeyboardButton("⬅️ Hide", callback_data=f"sup_hide:{target_user_id}"),
+        ],
+    ])
+
+
+def support_more_buttons(target_user_id):
+    target_user_id = str(target_user_id)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👤 Profile", callback_data=f"sup_profile:{target_user_id}"),
+            InlineKeyboardButton("⭐ Points", callback_data=f"sup_points:{target_user_id}"),
         ],
         [
+            InlineKeyboardButton("📱 Copy Phone", callback_data=f"sup_phone:{target_user_id}"),
+            InlineKeyboardButton("👤 Assign Me", callback_data=f"sup_assign:{target_user_id}"),
+        ],
+        [
+            InlineKeyboardButton("📜 Chat Log", callback_data=f"sup_chatlog:{target_user_id}"),
             InlineKeyboardButton("🔥 Urgent", callback_data=f"sup_status_urgent:{target_user_id}"),
-            InlineKeyboardButton("✅ Close", callback_data=f"sup_status_done:{target_user_id}"),
+        ],
+        [
+            InlineKeyboardButton("🟡 Pending", callback_data=f"sup_status_pending:{target_user_id}"),
+            InlineKeyboardButton("🟢 Replied", callback_data=f"sup_status_replied:{target_user_id}"),
         ],
         [
             InlineKeyboardButton("🚫 Ban", callback_data=f"sup_ban:{target_user_id}"),
             InlineKeyboardButton("✅ Unban", callback_data=f"sup_unban:{target_user_id}"),
         ],
+        [
+            InlineKeyboardButton("⬅️ Hide", callback_data=f"sup_hide:{target_user_id}"),
+        ],
     ])
 
 
-def support_username(tg_user) -> str:
+def support_recall_keyboard(log_id):
+    if not log_id:
+        return None
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("↩️ Recall sent message", callback_data=f"sup_recall:{int(log_id)}")]
+    ])
+
+
+def support_format_ticket_row(row, index=1):
+    status = SUPPORT_STATUS_LABELS.get(row.get("status") or "open", row.get("status") or "open")
+    priority = "🔥 Urgent" if row.get("priority") == "urgent" else "Normal"
+    assigned = row.get("assigned_name") or "-"
+    return (
+        f"{index}. {status} | {priority}\n"
+        f"👤 {row.get('name') or 'Customer'}\n"
+        f"📱 {row.get('phone_number') or 'Not Verified'}\n"
+        f"🆔 {row.get('user_id')}\n"
+        f"👤 Assigned: {assigned}\n"
+        f"🕒 Updated: {row.get('updated_at') or '-'}\n"
+        f"查看: /chatlog {row.get('user_id')}"
+    )
+
+
+def support_list_tickets(status=None, limit=10):
     try:
-        return f"@{tg_user.username}" if tg_user and tg_user.username else "No Username"
-    except Exception:
-        return "No Username"
+        if status:
+            rows = db_fetchall(
+                """
+                SELECT st.*, u.name, u.phone_number
+                FROM support_tickets st
+                LEFT JOIN users u ON u.user_id = st.user_id
+                WHERE st.status=%s
+                ORDER BY st.updated_at DESC
+                LIMIT %s
+                """,
+                (status, int(limit)),
+            )
+        else:
+            rows = db_fetchall(
+                """
+                SELECT st.*, u.name, u.phone_number
+                FROM support_tickets st
+                LEFT JOIN users u ON u.user_id = st.user_id
+                ORDER BY st.updated_at DESC
+                LIMIT %s
+                """,
+                (int(limit),),
+            )
+        return rows or []
+    except Exception as e:
+        logger.warning("support_list_tickets failed: %s", e)
+        return []
 
 
-def support_customer_header(tg_user, db_user=None, message_label="💬 Message") -> str:
-    db_user = db_user or {}
-    user_id = str(tg_user.id) if tg_user else str(db_user.get("user_id", ""))
-    phone = db_user.get("phone_number") or "Not Verified"
-    phone_verified = "✅ Yes" if safe_int(db_user.get("phone_verified", 0)) == 1 else "⚠️ Not Verified"
-    points = safe_int(db_user.get("points", 0))
-    invites = safe_int(db_user.get("invited_count", 0))
-    gift = "Yes" if safe_int(db_user.get("gift_claimed", 0)) == 1 else "No"
-    banned = "YES" if safe_int(db_user.get("is_banned", 0)) == 1 else "NO"
-    full_name = tg_user.full_name if tg_user else (db_user.get("name") or "Customer")
-    username = support_username(tg_user)
+def support_format_tickets(status=None, limit=10):
+    rows = support_list_tickets(status=status, limit=limit)
+    title = "✅ Closed Chats" if status == "done" else "📋 Recent Support Chats"
+    if not rows:
+        return f"{title}\n\nNo records found."
+    blocks = [title]
+    for i, row in enumerate(rows, 1):
+        blocks.append(support_format_ticket_row(row, i))
+    return "\n\n".join(blocks)
 
-    return (
-        "🟡 OPEN CUSTOMER CHAT\n\n"
-        f"👤 Name: {full_name}\n"
-        f"📱 Phone: {phone}\n"
-        f"✅ Verified: {phone_verified}\n"
-        f"🔗 Username: {username}\n"
-        f"🆔 User ID: {user_id}\n\n"
-        f"⭐ Points: {points}\n"
-        f"👥 Invites: {invites}\n"
-        f"🎁 RM38 Claimed: {gift}\n"
-        f"🚫 Banned: {banned}\n\n"
-        f"{support_ticket_line(user_id)}\n\n"
-        "━━━━━━━━━━━━━━\n"
-        f"{message_label}:\n"
+
+def support_chatlog_text(target_user_id, limit=20):
+    row = get_user(target_user_id) or {}
+    logs = db_fetchall(
+        """
+        SELECT *
+        FROM support_chat_logs
+        WHERE user_id=%s
+        ORDER BY id DESC
+        LIMIT %s
+        """,
+        (str(target_user_id), int(limit)),
+    ) or []
+    logs = list(reversed(logs))
+
+    title = (
+        "📜 Customer Chat Log\n\n"
+        f"👤 {row.get('name') or 'Customer'}\n"
+        f"📱 {row.get('phone_number') or 'Not Verified'}\n"
+        f"🆔 {target_user_id}\n"
     )
+    if not logs:
+        return title + "\nNo chat logs yet."
 
-
-def support_intro_text(user_id=None) -> str:
-    lang = get_user_language(user_id) if user_id else "ms"
-    if lang == "zh":
-        return (
-            "🎧 JOMJUDI88 客服\n\n"
-            "请直接在这里输入你的问题，或发送 screenshot / 文件。\n"
-            "客服会尽快回复你。\n\n"
-            "如果是 Claim / Deposit 问题，请一起发送：\n"
-            "• 游戏账号 User ID / Username\n"
-            "• Deposit screenshot\n"
-            "• 遇到的问题"
-        )
-    if lang == "en":
-        return (
-            "🎧 JOMJUDI88 Customer Service\n\n"
-            "Type your question here, or send a screenshot/file.\n"
-            "Our customer service team will reply as soon as possible.\n\n"
-            "For claim/deposit issues, please include:\n"
-            "• Game User ID / Username\n"
-            "• Deposit screenshot\n"
-            "• Your issue"
-        )
-    return (
-        "🎧 JOMJUDI88 Customer Service\n\n"
-        "Boss, terus taip masalah anda di sini, atau hantar screenshot / file.\n"
-        "Customer service akan reply secepat mungkin.\n\n"
-        "Untuk claim/deposit, sila hantar sekali:\n"
-        "• Game User ID / Username\n"
-        "• Deposit screenshot\n"
-        "• Masalah yang Boss hadapi"
-    )
+    lines = [title]
+    for log in logs:
+        direction = log.get("direction") or ""
+        if direction == "customer_to_support":
+            who = "客户"
+        elif direction == "support_to_customer":
+            who = f"客服 {log.get('admin_name') or ''}".strip()
+        else:
+            who = direction or "System"
+        recalled = " [RECALLED]" if safe_int(log.get("is_recalled", 0)) == 1 else ""
+        content = (log.get("content") or "").strip() or f"[{log.get('message_type') or 'message'}]"
+        lines.append(f"{log.get('created_at') or '-'}\n{who}{recalled}: {content}")
+    return "\n\n".join(lines)
 
 
 def support_store_message(group_message_id, user_id, message_type=""):
@@ -730,7 +998,7 @@ def support_profile_text(target_user_id):
         f"Banned: {banned}\n\n"
         f"⭐ Points: {safe_int(row.get('points', 0))}\n"
         f"👥 Invites: {safe_int(row.get('invited_count', 0))}\n"
-        f"🎁 Gift Claimed: {safe_int(row.get('gift_claimed', 0))}\n"
+        f"🎁 RM38 Claimed: {'Yes' if safe_int(row.get('gift_claimed', 0)) == 1 else 'No'}\n"
         f"🔥 Check-in Streak: {safe_int(row.get('checkin_streak', 0))}\n\n"
         f"📌 Ticket Status: {status}\n"
         f"👤 Assigned: {assigned}\n"
@@ -767,6 +1035,75 @@ def support_points_text(target_user_id):
     )
 
 
+async def support_edit_or_reply_panel(query, text, reply_markup):
+    try:
+        await query.message.reply_text(text, reply_markup=reply_markup)
+    except Exception:
+        await query.message.reply_text(text)
+
+
+async def support_hide_panel(query):
+    try:
+        await query.message.delete()
+        return
+    except Exception:
+        pass
+    try:
+        await query.message.edit_text("⬅️ Panel hidden.")
+    except Exception:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+
+async def support_close_visible_message(context, target_user_id, source_message=None):
+    """Try to collapse the last customer message into a short closed summary and remove buttons."""
+    text = support_closed_summary_text(target_user_id)
+    ticket = support_get_ticket(target_user_id) or {}
+    support_id = get_support_group_id()
+    target_mid = safe_int(ticket.get("last_group_message_id", 0))
+
+    if support_id and target_mid:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=support_id,
+                message_id=target_mid,
+                text=text,
+                reply_markup=None,
+            )
+            return True
+        except Exception:
+            pass
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=support_id,
+                message_id=target_mid,
+                caption=text[:1024],
+                reply_markup=None,
+            )
+            return True
+        except Exception:
+            pass
+
+    if source_message:
+        try:
+            if source_message.text:
+                await source_message.edit_text(text, reply_markup=None)
+                return True
+            if source_message.caption:
+                await source_message.edit_caption(text[:1024], reply_markup=None)
+                return True
+        except Exception:
+            pass
+        try:
+            await source_message.edit_reply_markup(reply_markup=None)
+            return True
+        except Exception:
+            pass
+    return False
+
+
 async def notify_support_group(context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None):
     support_id = get_support_group_id()
     if support_id is None:
@@ -793,7 +1130,6 @@ async def notify_support_new_user(context: ContextTypes.DEFAULT_TYPE, tg_user, r
             "🆕 New Customer Joined\n\n"
             f"👤 {tg_user.full_name}\n"
             f"📱 {db_user.get('phone_number') or 'Not Verified'}\n"
-            f"✅ Verified: {'Yes' if safe_int(db_user.get('phone_verified', 0)) == 1 else 'Not Verified'}\n"
             f"🔗 {support_username(tg_user)}\n"
             f"🆔 {tg_user.id}\n"
             f"👥 Referrer: {referrer_id or '-'}"
@@ -801,7 +1137,7 @@ async def notify_support_new_user(context: ContextTypes.DEFAULT_TYPE, tg_user, r
         sent = await context.bot.send_message(
             chat_id=support_id,
             text=text,
-            reply_markup=support_buttons(tg_user.id),
+            reply_markup=support_main_buttons(tg_user.id),
         )
         if sent:
             support_store_message(sent.message_id, tg_user.id, "new_user")
@@ -810,10 +1146,20 @@ async def notify_support_new_user(context: ContextTypes.DEFAULT_TYPE, tg_user, r
         logger.warning("notify_support_new_user failed: %s", e)
 
 
-async def support_send_text_to_customer(context: ContextTypes.DEFAULT_TYPE, target_user_id, text: str, admin_id=None, action="support_quick_reply"):
-    await context.bot.send_message(chat_id=int(target_user_id), text=text)
+async def support_send_text_to_customer(context: ContextTypes.DEFAULT_TYPE, target_user_id, text: str, admin_id=None, admin_name="", action="support_quick_reply"):
+    sent = await context.bot.send_message(chat_id=int(target_user_id), text=text)
+    log_id = support_log_chat(
+        target_user_id,
+        "support_to_customer",
+        "text",
+        text,
+        customer_message_id=getattr(sent, "message_id", 0),
+        admin_id=admin_id or "",
+        admin_name=admin_name or "",
+    )
     if admin_id:
         audit_log(admin_id, action, f"target={target_user_id}")
+    return sent, log_id
 
 
 async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -840,89 +1186,89 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
         db_user = get_user(user_id) or {}
         msg = update.effective_message
         caption = (msg.caption or "").strip()
-        text = (msg.text or "").strip()
+        msg_type, preview = support_message_preview(msg)
 
         sent = None
-        if text:
-            header = support_customer_header(tg_user, db_user, "💬 Message")
+        if msg.text:
+            header = support_compact_header(tg_user, db_user, "💬 Message")
             sent = await context.bot.send_message(
                 chat_id=support_id,
-                text=header + text,
-                reply_markup=support_buttons(user_id),
+                text=header + msg.text.strip(),
+                reply_markup=support_main_buttons(user_id),
             )
             message_type = "text"
 
         elif msg.photo:
-            header = support_customer_header(tg_user, db_user, "📷 Photo / Screenshot")
+            header = support_compact_header(tg_user, db_user, "📷 Photo / Screenshot")
             cap = (header + (caption or "Photo received"))[:1024]
             sent = await context.bot.send_photo(
                 chat_id=support_id,
                 photo=msg.photo[-1].file_id,
                 caption=cap,
-                reply_markup=support_buttons(user_id),
+                reply_markup=support_main_buttons(user_id),
             )
             message_type = "photo"
 
         elif msg.document:
-            header = support_customer_header(tg_user, db_user, "📄 Document / File")
+            header = support_compact_header(tg_user, db_user, "📄 Document / File")
             cap = (header + (caption or f"File: {msg.document.file_name or ''}"))[:1024]
             sent = await context.bot.send_document(
                 chat_id=support_id,
                 document=msg.document.file_id,
                 caption=cap,
-                reply_markup=support_buttons(user_id),
+                reply_markup=support_main_buttons(user_id),
             )
             message_type = "document"
 
         elif msg.video:
-            header = support_customer_header(tg_user, db_user, "🎥 Video")
+            header = support_compact_header(tg_user, db_user, "🎥 Video")
             cap = (header + (caption or "Video received"))[:1024]
             sent = await context.bot.send_video(
                 chat_id=support_id,
                 video=msg.video.file_id,
                 caption=cap,
-                reply_markup=support_buttons(user_id),
+                reply_markup=support_main_buttons(user_id),
             )
             message_type = "video"
 
         elif msg.voice:
-            header = support_customer_header(tg_user, db_user, "🎤 Voice Message")
+            header = support_compact_header(tg_user, db_user, "🎤 Voice Message")
             sent = await context.bot.send_voice(
                 chat_id=support_id,
                 voice=msg.voice.file_id,
                 caption=(header + "Voice received")[:1024],
-                reply_markup=support_buttons(user_id),
+                reply_markup=support_main_buttons(user_id),
             )
             message_type = "voice"
 
         elif msg.audio:
-            header = support_customer_header(tg_user, db_user, "🎵 Audio")
+            header = support_compact_header(tg_user, db_user, "🎵 Audio")
             cap = (header + (caption or "Audio received"))[:1024]
             sent = await context.bot.send_audio(
                 chat_id=support_id,
                 audio=msg.audio.file_id,
                 caption=cap,
-                reply_markup=support_buttons(user_id),
+                reply_markup=support_main_buttons(user_id),
             )
             message_type = "audio"
 
         elif msg.animation:
-            header = support_customer_header(tg_user, db_user, "🎞 Animation")
+            header = support_compact_header(tg_user, db_user, "🎞 Animation")
             cap = (header + (caption or "Animation received"))[:1024]
             sent = await context.bot.send_animation(
                 chat_id=support_id,
                 animation=msg.animation.file_id,
                 caption=cap,
-                reply_markup=support_buttons(user_id),
+                reply_markup=support_main_buttons(user_id),
             )
             message_type = "animation"
 
         elif msg.sticker:
-            header = support_customer_header(tg_user, db_user, "🌟 Sticker")
+            header = support_compact_header(tg_user, db_user, "🌟 Sticker")
             info = await context.bot.send_message(
                 chat_id=support_id,
                 text=header + "Sticker received below.",
-                reply_markup=support_buttons(user_id),
+                reply_markup=support_main_buttons(user_id),
             )
             support_store_message(info.message_id, user_id, "sticker_info")
             sent = await context.bot.send_sticker(
@@ -932,11 +1278,11 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
             message_type = "sticker"
 
         else:
-            header = support_customer_header(tg_user, db_user, "📨 Unsupported Message")
+            header = support_compact_header(tg_user, db_user, "📨 Unsupported Message")
             info = await context.bot.send_message(
                 chat_id=support_id,
                 text=header + "Unsupported message type. Copied below if possible.",
-                reply_markup=support_buttons(user_id),
+                reply_markup=support_main_buttons(user_id),
             )
             support_store_message(info.message_id, user_id, "unsupported_info")
             sent = await context.bot.copy_message(
@@ -949,6 +1295,14 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
         if sent:
             support_store_message(sent.message_id, user_id, message_type)
             support_touch_ticket(user_id, status="open", last_group_message_id=sent.message_id)
+            support_log_chat(
+                user_id,
+                "customer_to_support",
+                msg_type,
+                preview,
+                group_message_id=sent.message_id,
+                customer_message_id=msg.message_id,
+            )
             return True
 
     except Exception as e:
@@ -983,12 +1337,17 @@ async def support_group_reply_handler(update: Update, context: ContextTypes.DEFA
             return
 
         msg = update.effective_message
+
+        # Do not accidentally send support commands such as /qr or /more to customers.
+        if msg.text and msg.text.strip().startswith("/"):
+            return
+
         replied = msg.reply_to_message
         target_user_id = support_lookup_user_id(replied.message_id)
         if not target_user_id:
             return
 
-        await context.bot.copy_message(
+        sent = await context.bot.copy_message(
             chat_id=int(target_user_id),
             from_chat_id=msg.chat_id,
             message_id=msg.message_id,
@@ -999,8 +1358,19 @@ async def support_group_reply_handler(update: Update, context: ContextTypes.DEFA
             assigned_to=update.effective_user.id,
             assigned_name=update.effective_user.full_name,
         )
+        msg_type, preview = support_message_preview(msg)
+        log_id = support_log_chat(
+            target_user_id,
+            "support_to_customer",
+            msg_type,
+            preview,
+            group_message_id=msg.message_id,
+            customer_message_id=getattr(sent, "message_id", 0),
+            admin_id=update.effective_user.id,
+            admin_name=update.effective_user.full_name,
+        )
         try:
-            await msg.reply_text("✅ Sent")
+            await msg.reply_text("✅ Sent", reply_markup=support_recall_keyboard(log_id))
         except Exception:
             pass
         audit_log(update.effective_user.id, "support_reply", f"target={target_user_id}")
@@ -1014,10 +1384,40 @@ async def support_group_reply_handler(update: Update, context: ContextTypes.DEFA
         logger.exception("support_group_reply_handler failed: %s", e)
 
 
+async def support_recall_sent_message(context: ContextTypes.DEFAULT_TYPE, log_id, admin_user=None):
+    log = support_get_log(log_id)
+    if not log:
+        return False, "❌ Recall failed: record not found."
+
+    if (log.get("direction") or "") != "support_to_customer":
+        return False, "❌ Only support replies sent by bot can be recalled."
+
+    target_user_id = str(log.get("user_id") or "")
+    customer_message_id = safe_int(log.get("customer_message_id", 0))
+    if not target_user_id or not customer_message_id:
+        return False, "❌ Recall failed: customer message id not found."
+
+    try:
+        await context.bot.delete_message(chat_id=int(target_user_id), message_id=customer_message_id)
+        support_update_log_recalled(log_id)
+        if admin_user:
+            audit_log(admin_user.id, "support_recall", f"log={log_id} target={target_user_id}")
+        return True, "✅ Recalled from customer's chat."
+    except Exception as e:
+        logger.warning("support recall failed: %s", e)
+        return False, "❌ Recall failed. Telegram may not allow deleting this message anymore. Send a correction instead."
+
+
 async def handle_support_callback(query, data: str, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not is_admin(query.from_user.id):
             await query.message.reply_text("❌ Admin only.")
+            return
+
+        if data.startswith("sup_recall:"):
+            log_id = data.split(":", 1)[1]
+            ok, msg = await support_recall_sent_message(context, log_id, query.from_user)
+            await query.message.reply_text(msg)
             return
 
         try:
@@ -1028,11 +1428,31 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
 
         target_user_id = str(target_user_id).strip()
 
-        if action == "sup_profile":
+        if action == "sup_panel_qr":
+            await support_edit_or_reply_panel(
+                query,
+                f"⚡ Quick Reply Panel\n\nCustomer: {target_user_id}",
+                support_quick_reply_buttons(target_user_id),
+            )
+
+        elif action == "sup_panel_more":
+            await support_edit_or_reply_panel(
+                query,
+                f"📂 More Actions\n\nCustomer: {target_user_id}",
+                support_more_buttons(target_user_id),
+            )
+
+        elif action == "sup_hide":
+            await support_hide_panel(query)
+
+        elif action == "sup_profile":
             await query.message.reply_text(support_profile_text(target_user_id))
 
         elif action == "sup_points":
             await query.message.reply_text(support_points_text(target_user_id))
+
+        elif action == "sup_chatlog":
+            await query.message.reply_text(support_chatlog_text(target_user_id, limit=20)[:3900])
 
         elif action == "sup_phone":
             row = get_user(target_user_id) or {}
@@ -1062,23 +1482,29 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
                 assigned_to=query.from_user.id if final_status in ["replied", "done"] else None,
                 assigned_name=query.from_user.full_name if final_status in ["replied", "done"] else None,
                 priority=priority,
+                closed_by=query.from_user.id if final_status == "done" else None,
             )
             label = SUPPORT_STATUS_LABELS.get(status, status)
-            await query.message.reply_text(
-                "📌 Ticket Updated\n\n"
-                f"Customer: {target_user_id}\n"
-                f"Status: {label}\n"
-                f"By: {query.from_user.full_name}"
-            )
+            if final_status == "done":
+                await support_close_visible_message(context, target_user_id, source_message=query.message)
+                await query.message.reply_text(f"✅ Closed. Check back anytime: /chatlog {target_user_id}")
+            else:
+                await query.message.reply_text(
+                    "📌 Ticket Updated\n\n"
+                    f"Customer: {target_user_id}\n"
+                    f"Status: {label}\n"
+                    f"By: {query.from_user.full_name}"
+                )
             audit_log(query.from_user.id, "support_status", f"target={target_user_id} status={status}")
 
         elif action in SUPPORT_QUICK_REPLIES:
             label, reply_text = SUPPORT_QUICK_REPLIES[action]
-            await support_send_text_to_customer(
+            sent, log_id = await support_send_text_to_customer(
                 context,
                 target_user_id,
                 reply_text,
                 admin_id=query.from_user.id,
+                admin_name=query.from_user.full_name,
                 action=action,
             )
             new_status = "done" if action == "sup_qr_done" else "replied"
@@ -1087,8 +1513,19 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
                 status=new_status,
                 assigned_to=query.from_user.id,
                 assigned_name=query.from_user.full_name,
+                closed_by=query.from_user.id if new_status == "done" else None,
             )
-            await query.message.reply_text(f"✅ Quick reply sent: {label}")
+            if action == "sup_qr_done":
+                await support_close_visible_message(context, target_user_id, source_message=query.message)
+                await query.message.reply_text(
+                    f"✅ Done reply sent and chat closed.\nCheck back: /chatlog {target_user_id}",
+                    reply_markup=support_recall_keyboard(log_id),
+                )
+            else:
+                await query.message.reply_text(
+                    f"✅ Quick reply sent: {label}",
+                    reply_markup=support_recall_keyboard(log_id),
+                )
 
         elif action == "sup_ban":
             set_user_banned(target_user_id, True)
@@ -1128,911 +1565,106 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
             pass
 
 
-def set_user_language(user_id, language):
-    lang = str(language or "ms").lower()
-    if lang not in ["ms", "en", "zh"]:
-        lang = "ms"
-    db_execute("UPDATE users SET language=%s WHERE user_id=%s", (lang, str(user_id)))
+def support_command_target_from_reply(update: Update):
+    if not update.effective_message or not update.effective_message.reply_to_message:
+        return None
+    return support_lookup_user_id(update.effective_message.reply_to_message.message_id)
 
 
-def get_user_language(user_id) -> str:
-    try:
-        user = get_user(user_id)
-        lang = (user or {}).get("language") or "ms"
-        return lang if lang in ["ms", "en", "zh"] else "ms"
-    except Exception:
-        return "ms"
-
-
-def normalize_phone(phone: str) -> str:
-    phone = (phone or "").strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-    if phone.startswith("00"):
-        phone = "+" + phone[2:]
-    elif phone.startswith("60"):
-        phone = "+" + phone
-    elif phone.startswith("0"):
-        phone = "+6" + phone
-    return phone
-
-
-def is_phone_verified(user_id) -> bool:
-    user = get_user(user_id)
-    return bool(user and safe_int(user.get("phone_verified", 0)) == 1)
-
-
-def get_verify_keyboard():
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 Verify Malaysia Number", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-        input_field_placeholder="Tap to verify your number",
+async def support_qr_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    target_user_id = support_command_target_from_reply(update)
+    if not target_user_id:
+        await update.effective_message.reply_text("Reply 顾客那条消息，然后输入 /qr")
+        return
+    await update.effective_message.reply_text(
+        f"⚡ Quick Reply Panel\n\nCustomer: {target_user_id}",
+        reply_markup=support_quick_reply_buttons(target_user_id),
     )
 
 
-def get_verified_phones(limit=300):
-    return db_fetchall("""
-        SELECT user_id, name, phone_number, phone_verified_at, created_at
-        FROM users
-        WHERE phone_verified=1 AND phone_number <> ''
-        ORDER BY phone_verified_at DESC, created_at DESC
-        LIMIT %s
-    """, (int(limit),))
-
-
-def create_user(user_id, name, referrer_id=None):
-    db_execute("""
-        INSERT INTO users
-        (user_id, name, points, invited_count, spin_chances, gift_claimed, referrer_id,
-         mission_claimed, last_lucky_claim, last_vip_claim, last_elite_claim,
-         checkin_streak, last_checkin_at, last_checkin_reminder_at, last_seen_at, created_at)
-        VALUES (%s,%s,0,0,0,0,%s,0,'','','',0,'','',%s,%s)
-        ON CONFLICT (user_id) DO UPDATE SET
-            name = EXCLUDED.name,
-            last_seen_at = EXCLUDED.last_seen_at
-    """, (str(user_id), name or "User", referrer_id, now_iso(), now_iso()))
-
-
-def ensure_user(user_id, name="User"):
-    user = get_user(user_id)
-    if user:
-        try:
-            db_execute("UPDATE users SET name=%s, last_seen_at=%s WHERE user_id=%s", (name or "User", now_iso(), str(user_id)))
-        except Exception:
-            pass
-        return user
-
-    create_user(str(user_id), name or "User")
-    user = get_user(user_id)
-    if not user:
-        raise RuntimeError(f"Could not create/fetch user {user_id}")
-    return user
-
-
-def add_points(user_id, amount):
-    amount = safe_int(amount)
-    db_execute("""
-        UPDATE users
-        SET points = GREATEST(points + %s, 0)
-        WHERE user_id=%s
-    """, (amount, str(user_id)))
-
-
-def set_points(user_id, points):
-    db_execute("UPDATE users SET points=%s WHERE user_id=%s", (max(safe_int(points), 0), str(user_id)))
-
-
-def add_invite(referrer_id):
-    db_execute("""
-        UPDATE users
-        SET invited_count = invited_count + 1,
-            points = points + 1
-        WHERE user_id=%s
-    """, (str(referrer_id),))
-
-
-def reward_referrer_if_needed(new_user_id: str):
-    """Credit referral only after Malaysia phone verification, once per user."""
-    conn = None
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(new_user_id),))
-            user = cur.fetchone()
-            if not user:
-                conn.rollback()
-                return
-
-            referrer_id = user.get("referrer_id")
-            if not referrer_id or referrer_id == str(new_user_id):
-                conn.rollback()
-                return
-
-            if safe_int(user.get("invite_rewarded", 0)) == 1:
-                conn.rollback()
-                return
-
-            cur.execute("""
-                UPDATE users
-                SET invited_count = invited_count + 1,
-                    points = points + 1
-                WHERE user_id=%s
-            """, (str(referrer_id),))
-
-            cur.execute("UPDATE users SET invite_rewarded=1 WHERE user_id=%s", (str(new_user_id),))
-
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(referrer_id), "invite_rewarded_after_phone_verify", f"new_user={new_user_id}", now_iso()),
-            )
-
-        conn.commit()
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.warning("reward_referrer_if_needed failed: %s", e)
-    finally:
-        put_conn(conn)
-
-
-def get_top_invites():
-    return db_fetchall("""
-        SELECT name, points, invited_count
-        FROM users
-        ORDER BY invited_count DESC, points DESC
-        LIMIT 10
-    """)
-
-
-def get_all_users():
-    return db_fetchall("""
-        SELECT
-            u.user_id,
-            u.name,
-            u.points,
-            u.invited_count,
-            u.phone_number,
-            u.phone_verified,
-            COALESCE(u.checkin_streak, 0) AS checkin_streak,
-            COALESCE(u.last_checkin_at, '') AS last_checkin_at,
-            COALESCE(dm.rm100_count, 0) AS rm100_count,
-            COALESCE(dm.rm300_count, 0) AS rm300_count
-        FROM users u
-        LEFT JOIN (
-            SELECT
-                user_id,
-                SUM(CASE WHEN deposit_amount=100 AND status='approved' THEN 1 ELSE 0 END) AS rm100_count,
-                SUM(CASE WHEN deposit_amount=300 AND status='approved' THEN 1 ELSE 0 END) AS rm300_count
-            FROM deposit_mission_requests
-            GROUP BY user_id
-        ) dm ON dm.user_id = u.user_id
-        ORDER BY u.invited_count DESC, u.points DESC
-    """)
-
-
-def get_stats():
-    return db_fetchone("""
-        SELECT
-            COUNT(*) AS total_users,
-            COALESCE(SUM(points),0) AS total_points,
-            COALESCE(SUM(invited_count),0) AS total_invites,
-            COALESCE(SUM(CASE WHEN gift_claimed=1 THEN 1 ELSE 0 END),0) AS gifts_claimed
-        FROM users
-    """)
-
-
-def get_pending_redeems(limit=20):
-    return db_fetchall("""
-        SELECT * FROM redeem_requests
-        WHERE status='pending'
-        ORDER BY id DESC
-        LIMIT %s
-    """, (int(limit),))
-
-
-def get_pending_gifts(limit=20):
-    return db_fetchall("""
-        SELECT * FROM gift_requests
-        WHERE status='pending'
-        ORDER BY id DESC
-        LIMIT %s
-    """, (int(limit),))
-
-
-def get_pending_deposit_missions(limit=20):
-    return db_fetchall("""
-        SELECT * FROM deposit_mission_requests
-        WHERE status='pending'
-        ORDER BY id DESC
-        LIMIT %s
-    """, (int(limit),))
-
-
-def update_user_checkin_after_claim(cur, user):
-    """Update check-in streak when a daily reward is successfully claimed."""
-    today = today_str()
-    yesterday = (now_my() - timedelta(days=1)).strftime("%Y-%m-%d")
-    last_checkin = (user.get("last_checkin_at") or "")[:10]
-
-    if last_checkin == today:
-        new_streak = safe_int(user.get("checkin_streak", 0))
-    elif last_checkin == yesterday:
-        new_streak = safe_int(user.get("checkin_streak", 0)) + 1
-    else:
-        new_streak = 1
-
-    cur.execute(
-        """
-        UPDATE users
-        SET checkin_streak=%s,
-            last_checkin_at=%s
-        WHERE user_id=%s
-        """,
-        (new_streak, now_iso(), str(user.get("user_id"))),
-    )
-    return new_streak
-
-
-def get_users_for_checkin_reminder():
-    """Users who have not checked in recently. Gentle push: max once every few days."""
-    today = today_str()
-    inactive_cutoff = (now_my() - timedelta(days=2)).strftime("%Y-%m-%d")
-    push_cutoff = (now_my() - timedelta(days=CHECKIN_PUSH_COOLDOWN_DAYS)).isoformat(timespec="seconds")
-
-    return db_fetchall("""
-        SELECT user_id, name, language, last_checkin_at, last_checkin_push_at
-        FROM users
-        WHERE phone_verified=1
-          AND (
-                COALESCE(last_checkin_push_at, '') = ''
-             OR last_checkin_push_at <= %s
-          )
-          AND (
-                (COALESCE(last_checkin_at, '') = '' AND LEFT(COALESCE(created_at, ''), 10) <= %s)
-             OR (COALESCE(last_checkin_at, '') <> '' AND LEFT(last_checkin_at, 10) <= %s)
-          )
-        ORDER BY COALESCE(last_checkin_push_at, '') ASC, last_checkin_at ASC
-        LIMIT %s
-    """, (push_cutoff, inactive_cutoff, inactive_cutoff, PUSH_MAX_PER_RUN))
-
-
-def get_users_for_share_reminder():
-    """Users who can benefit from Share & Earn reminder. Gentle push: max once a week."""
-    push_cutoff = (now_my() - timedelta(days=SHARE_PUSH_COOLDOWN_DAYS)).isoformat(timespec="seconds")
-    created_cutoff = (now_my() - timedelta(days=2)).strftime("%Y-%m-%d")
-
-    return db_fetchall("""
-        SELECT user_id, name, language, invited_count, last_share_push_at
-        FROM users
-        WHERE phone_verified=1
-          AND LEFT(COALESCE(created_at, ''), 10) <= %s
-          AND COALESCE(invited_count, 0) < 20
-          AND (
-                COALESCE(last_share_push_at, '') = ''
-             OR last_share_push_at <= %s
-          )
-        ORDER BY COALESCE(last_share_push_at, '') ASC, invited_count ASC
-        LIMIT %s
-    """, (created_cutoff, push_cutoff, PUSH_MAX_PER_RUN))
-
-
-def mark_checkin_reminder_sent(user_id):
-    # Keep old column updated for compatibility, and use the new dedicated push column.
-    db_execute(
-        "UPDATE users SET last_checkin_reminder_at=%s, last_checkin_push_at=%s WHERE user_id=%s",
-        (now_iso(), now_iso(), str(user_id)),
+async def support_more_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    target_user_id = support_command_target_from_reply(update)
+    if not target_user_id:
+        await update.effective_message.reply_text("Reply 顾客那条消息，然后输入 /more")
+        return
+    await update.effective_message.reply_text(
+        f"📂 More Actions\n\nCustomer: {target_user_id}",
+        reply_markup=support_more_buttons(target_user_id),
     )
 
 
-def mark_share_reminder_sent(user_id):
-    db_execute("UPDATE users SET last_share_push_at=%s WHERE user_id=%s", (now_iso(), str(user_id)))
+async def support_info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    target_user_id = support_command_target_from_reply(update)
+    if not target_user_id and context.args:
+        target_user_id = context.args[0]
+    if not target_user_id:
+        await update.effective_message.reply_text("Reply 顾客消息输入 /info，或输入 /info USER_ID")
+        return
+    await update.effective_message.reply_text(support_profile_text(target_user_id))
 
 
-def checkin_reminder_text(lang):
-    lang = lang if lang in ["ms", "en", "zh"] else "ms"
-    if lang == "zh":
-        return "🎁 Boss，今天的 Check In 还没领取哦。\n\n回来按一下，继续收集 Reward Points 🔥"
-    if lang == "en":
-        return "🎁 Boss, your Check In reward is waiting.\n\nCome back and continue collecting Reward Points 🔥"
-    return "🎁 Boss, Check In reward anda sedang tunggu.\n\nJom masuk balik dan terus kumpul Reward Points 🔥"
+async def support_history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    target_user_id = support_command_target_from_reply(update)
+    if not target_user_id and context.args:
+        target_user_id = context.args[0]
+    if not target_user_id:
+        await update.effective_message.reply_text("Reply 顾客消息输入 /history，或输入 /chatlog USER_ID")
+        return
+    await update.effective_message.reply_text(support_chatlog_text(target_user_id, limit=20)[:3900])
 
 
-def share_reminder_text(lang, user_id):
-    link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-    lang = lang if lang in ["ms", "en", "zh"] else "ms"
-    if lang == "zh":
-        return (
-            "💰 Share & Earn 提醒\n\n"
-            "Boss，分享你的专属 link 给朋友，朋友验证后你就可以继续累积 Reward Points 🔥\n\n"
-            f"🔗 你的邀请链接:\n{link}"
-        )
-    if lang == "en":
-        return (
-            "💰 Share & Earn reminder\n\n"
-            "Boss, share your personal link with friends. When they verify, you can collect more Reward Points 🔥\n\n"
-            f"🔗 Your invite link:\n{link}"
-        )
-    return (
-        "💰 Share & Earn reminder\n\n"
-        "Boss, share link anda kepada kawan. Bila mereka verify, anda boleh kumpul lebih banyak Reward Points 🔥\n\n"
-        f"🔗 Link Boss:\n{link}"
+async def support_chatlog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await support_history_cmd(update, context)
+
+
+async def support_chats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    await update.effective_message.reply_text(support_format_tickets(status=None, limit=10)[:3900])
+
+
+async def support_closed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    await update.effective_message.reply_text(support_format_tickets(status="done", limit=10)[:3900])
+
+
+async def support_close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    target_user_id = support_command_target_from_reply(update)
+    if not target_user_id and context.args:
+        target_user_id = context.args[0]
+    if not target_user_id:
+        await update.effective_message.reply_text("Reply 顾客消息输入 /close，或输入 /close USER_ID")
+        return
+    support_touch_ticket(
+        target_user_id,
+        status="done",
+        assigned_to=update.effective_user.id,
+        assigned_name=update.effective_user.full_name,
+        closed_by=update.effective_user.id,
     )
-
-
-def checkin_push_keyboard(user_id):
-    # Push reminder button should match the main menu wording: 🎁 Check In.
-    # Customer taps this and goes directly to the Check In / Daily Reward page.
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(tr(user_id, "checkin"), callback_data="reward_center")],
-    ])
-
-
-def share_push_keyboard(user_id):
-    # Push reminder button should match the rewards menu wording: 💰 Share & Earn.
-    # Customer taps this and goes directly to their referral/share page inside the bot.
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(tr(user_id, "share_earn_btn"), callback_data="link")],
-    ])
-
-
-def broadcast_share_earn_keyboard():
-    """Inline buttons for promotional broadcasts.
-
-    Button 1 sends a new Share & Earn page through callback_data="broadcast_share" so the broadcast message stays unchanged.
-    Button 2 opens Customer Service for screenshot claim.
-    """
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Share Kepada Kawan", callback_data="broadcast_share")],
-        [InlineKeyboardButton("🎧 Screenshot Kepada Customer Service", url=SUPPORT_URL)],
-    ])
-
-
-# ================= TRANSACTION FLOWS =================
-
-def claim_daily_reward(user_id: str, reward_type: str, min_invites: int, reward_pool) -> Tuple[bool, str]:
-    """Locked transaction to stop double claim from double-click/spam."""
-    today = today_str()
-    column_map = {
-        "lucky": "last_lucky_claim",
-        "vip": "last_vip_claim",
-        "elite": "last_elite_claim",
-    }
-    title_map = {
-        "lucky": "Lucky Reward",
-        "vip": "VIP Reward",
-        "elite": "Elite Reward",
-    }
-    column = column_map.get(reward_type)
-    if not column:
-        return False, "⚠️ Invalid reward type."
-
-    conn = None
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
-            user = cur.fetchone()
-            if not user:
-                conn.rollback()
-                return False, "⚠️ User not found. Please press /start again."
-
-            if not is_admin(user_id):
-                if (
-                    user.get("last_lucky_claim") == today or
-                    user.get("last_vip_claim") == today or
-                    user.get("last_elite_claim") == today
-                ):
-                    conn.rollback()
-                    return False, tr(user_id, "daily_claimed")
-
-                if safe_int(user.get("invited_count", 0)) < min_invites:
-                    conn.rollback()
-                    return False, tr(user_id, "unlock_invites", title=title_map[reward_type], invites=min_invites)
-
-            reward = random_reward(reward_pool)
-            cur.execute(
-                f"UPDATE users SET {column}=%s, points=GREATEST(points + %s, 0) WHERE user_id=%s",
-                (today, int(reward), str(user_id)),
-            )
-
-            new_streak = update_user_checkin_after_claim(cur, user)
-
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(user_id), f"claim_{reward_type}", f"reward={reward}; checkin_streak={new_streak}", now_iso()),
-            )
-
-        conn.commit()
-
-        if reward > 0:
-            return True, tr(user_id, "reward_win", reward=reward)
-        return True, tr(user_id, "reward_zero")
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.exception("claim_daily_reward error: %s", e)
-        return False, "⚠️ Reward system busy. Please try again."
-    finally:
-        put_conn(conn)
-
-
-def claim_mission_reward(user_id: str) -> Tuple[bool, str]:
-    conn = None
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
-            user = cur.fetchone()
-            if not user:
-                conn.rollback()
-                return False, "⚠️ User not found. Please press /start again."
-
-            if safe_int(user.get("mission_claimed", 0)) == 1 and not is_admin(user_id):
-                conn.rollback()
-                return False, tr(user_id, "mission_claimed")
-
-            cur.execute("UPDATE users SET points=points+2, mission_claimed=1 WHERE user_id=%s", (str(user_id),))
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(user_id), "mission_claim", "+2 points", now_iso()),
-            )
-        conn.commit()
-        return True, tr(user_id, "mission_completed")
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.exception("claim_mission_reward error: %s", e)
-        return False, "⚠️ Mission system busy. Please try again."
-    finally:
-        put_conn(conn)
-
-
-def create_redeem_request_locked(user_id, username, reward_text, points_needed) -> Tuple[bool, str, Optional[int]]:
-    conn = None
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
-            user = cur.fetchone()
-            if not user:
-                conn.rollback()
-                return False, "⚠️ User not found. Please press /start again.", None
-
-            if safe_int(user.get("points", 0)) < int(points_needed) and not is_admin(user_id):
-                conn.rollback()
-                return False, tr(user_id, "not_enough_text"), None
-
-            cur.execute("""
-                SELECT id FROM redeem_requests
-                WHERE user_id=%s AND reward_text=%s AND status='pending'
-                LIMIT 1
-            """, (str(user_id), reward_text))
-            pending = cur.fetchone()
-            if pending:
-                conn.rollback()
-                return False, tr(user_id, "redeem_pending"), pending["id"]
-
-            cur.execute("""
-                INSERT INTO redeem_requests
-                (user_id, username, reward_text, points_needed, status, created_at)
-                VALUES (%s,%s,%s,%s,'pending',%s)
-                RETURNING id
-            """, (str(user_id), username, reward_text, int(points_needed), now_iso()))
-            row = cur.fetchone()
-            request_id = row["id"]
-
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(user_id), "redeem_request", f"{reward_text} / {points_needed} points / id={request_id}", now_iso()),
-            )
-
-        conn.commit()
-        return True, tr(user_id, "redeem_submitted"), request_id
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.exception("create_redeem_request_locked error: %s", e)
-        return False, "⚠️ Redeem system busy. Please try again.", None
-    finally:
-        put_conn(conn)
-
-
-def approve_redeem_request(request_id, admin_id) -> Tuple[bool, str, Optional[str], str]:
-    conn = None
-    target_user = None
-    reward_text = ""
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM redeem_requests WHERE id=%s FOR UPDATE", (int(request_id),))
-            req = cur.fetchone()
-            if not req:
-                conn.rollback()
-                return False, "❌ Redeem request not found.", None, ""
-
-            target_user = req["user_id"]
-            reward_text = req["reward_text"]
-
-            if req["status"] != "pending":
-                conn.rollback()
-                return False, f"⚠️ This request was already {req['status']}.", target_user, reward_text
-
-            cur.execute("""
-                UPDATE users
-                SET points = points - %s
-                WHERE user_id=%s AND points >= %s
-                RETURNING points
-            """, (req["points_needed"], req["user_id"], req["points_needed"]))
-            updated = cur.fetchone()
-            if not updated:
-                conn.rollback()
-                return False, "❌ User does not have enough points now. Approval cancelled.", target_user, reward_text
-
-            cur.execute("""
-                UPDATE redeem_requests
-                SET status='approved', processed_at=%s, processed_by=%s
-                WHERE id=%s
-            """, (now_iso(), str(admin_id), int(request_id)))
-
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(admin_id), "approve_redeem", f"request={request_id} target={target_user} reward={reward_text}", now_iso()),
-            )
-        conn.commit()
-        return True, "✅ Redeem Approved.", target_user, reward_text
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.exception("approve_redeem_request error: %s", e)
-        return False, "⚠️ Approval failed. Please check logs.", target_user, reward_text
-    finally:
-        put_conn(conn)
-
-
-def reject_redeem_request(request_id, admin_id) -> Tuple[bool, str, Optional[str], str]:
-    conn = None
-    target_user = None
-    reward_text = ""
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM redeem_requests WHERE id=%s FOR UPDATE", (int(request_id),))
-            req = cur.fetchone()
-            if not req:
-                conn.rollback()
-                return False, "❌ Redeem request not found.", None, ""
-
-            target_user = req["user_id"]
-            reward_text = req["reward_text"]
-
-            if req["status"] != "pending":
-                conn.rollback()
-                return False, f"⚠️ This request was already {req['status']}.", target_user, reward_text
-
-            cur.execute("""
-                UPDATE redeem_requests
-                SET status='rejected', processed_at=%s, processed_by=%s
-                WHERE id=%s
-            """, (now_iso(), str(admin_id), int(request_id)))
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(admin_id), "reject_redeem", f"request={request_id} target={target_user} reward={reward_text}", now_iso()),
-            )
-        conn.commit()
-        return True, "❌ Redeem Rejected.", target_user, reward_text
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.exception("reject_redeem_request error: %s", e)
-        return False, "⚠️ Reject failed. Please check logs.", target_user, reward_text
-    finally:
-        put_conn(conn)
-
-
-def create_gift_request_locked(user_id, username) -> Tuple[bool, str, Optional[int]]:
-    conn = None
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
-            user = cur.fetchone()
-            if not user:
-                conn.rollback()
-                return False, "⚠️ User not found. Please press /start again.", None
-
-            if safe_int(user.get("gift_claimed", 0)) == 1 and not is_admin(user_id):
-                conn.rollback()
-                return False, tr(user_id, "gift_claimed"), None
-
-            cur.execute("SELECT id FROM gift_requests WHERE user_id=%s AND status='pending' LIMIT 1", (str(user_id),))
-            pending = cur.fetchone()
-            if pending:
-                conn.rollback()
-                return False, tr(user_id, "gift_pending"), pending["id"]
-
-            cur.execute("""
-                INSERT INTO gift_requests (user_id, username, status, created_at)
-                VALUES (%s,%s,'pending',%s)
-                RETURNING id
-            """, (str(user_id), username, now_iso()))
-            row = cur.fetchone()
-            request_id = row["id"]
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(user_id), "gift_request", f"id={request_id}", now_iso()),
-            )
-        conn.commit()
-        return True, tr(user_id, "gift_submitted"), request_id
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.exception("create_gift_request_locked error: %s", e)
-        return False, "⚠️ Gift system busy. Please try again.", None
-    finally:
-        put_conn(conn)
-
-
-
-def create_deposit_mission_request_locked(user_id, username, deposit_amount, reward_points) -> Tuple[bool, str, Optional[int]]:
-    """User submits a daily deposit mission for admin review. Points are added only after admin approval."""
-    deposit_amount = safe_int(deposit_amount)
-    reward_points = safe_int(reward_points)
-    if deposit_amount not in [100, 300] or reward_points not in [2, 5]:
-        return False, tr(user_id, "deposit_invalid"), None
-
-    today = today_str()
-    conn = None
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE user_id=%s FOR UPDATE", (str(user_id),))
-            user = cur.fetchone()
-            if not user:
-                conn.rollback()
-                return False, "⚠️ User not found. Please press /start again.", None
-
-            # One pending request per user is enough. It prevents spam while admin is reviewing.
-            cur.execute("""
-                SELECT id FROM deposit_mission_requests
-                WHERE user_id=%s AND status='pending'
-                LIMIT 1
-            """, (str(user_id),))
-            pending = cur.fetchone()
-            if pending:
-                conn.rollback()
-                return False, tr(user_id, "deposit_pending"), pending["id"]
-
-            # Do not allow the same tier to be approved more than once per Malaysia day.
-            cur.execute("""
-                SELECT id FROM deposit_mission_requests
-                WHERE user_id=%s AND deposit_amount=%s AND status='approved' AND created_at LIKE %s
-                LIMIT 1
-            """, (str(user_id), deposit_amount, today + "%"))
-            approved_today = cur.fetchone()
-            if approved_today and not is_admin(user_id):
-                conn.rollback()
-                return False, tr(user_id, "deposit_already_claimed"), approved_today["id"]
-
-            cur.execute("""
-                INSERT INTO deposit_mission_requests
-                (user_id, username, deposit_amount, reward_points, status, created_at)
-                VALUES (%s,%s,%s,%s,'pending',%s)
-                RETURNING id
-            """, (str(user_id), username, deposit_amount, reward_points, now_iso()))
-            row = cur.fetchone()
-            request_id = row["id"]
-
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(user_id), "deposit_mission_request", f"deposit=RM{deposit_amount} reward=+{reward_points} id={request_id}", now_iso()),
-            )
-
-        conn.commit()
-        return True, tr(user_id, "deposit_submitted"), request_id
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.exception("create_deposit_mission_request_locked error: %s", e)
-        return False, "⚠️ Deposit mission system busy. Please try again.", None
-    finally:
-        put_conn(conn)
-
-
-def approve_deposit_mission_request(request_id, admin_id) -> Tuple[bool, str, Optional[str], int, int]:
-    conn = None
-    target_user = None
-    deposit_amount = 0
-    reward_points = 0
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM deposit_mission_requests WHERE id=%s FOR UPDATE", (int(request_id),))
-            req = cur.fetchone()
-            if not req:
-                conn.rollback()
-                return False, "❌ Deposit mission request not found.", None, 0, 0
-
-            target_user = req["user_id"]
-            deposit_amount = safe_int(req.get("deposit_amount"))
-            reward_points = safe_int(req.get("reward_points"))
-
-            if req["status"] != "pending":
-                conn.rollback()
-                return False, f"⚠️ This request was already {req['status']}.", target_user, deposit_amount, reward_points
-
-            cur.execute("UPDATE users SET points=points+%s WHERE user_id=%s", (reward_points, str(target_user)))
-            cur.execute("""
-                UPDATE deposit_mission_requests
-                SET status='approved', processed_at=%s, processed_by=%s
-                WHERE id=%s
-            """, (now_iso(), str(admin_id), int(request_id)))
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(admin_id), "approve_deposit_mission", f"request={request_id} target={target_user} RM{deposit_amount} +{reward_points}", now_iso()),
-            )
-        conn.commit()
-        return True, f"✅ Deposit Mission Approved. +{reward_points} points added.", target_user, deposit_amount, reward_points
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.exception("approve_deposit_mission_request error: %s", e)
-        return False, "⚠️ Deposit mission approval failed.", target_user, deposit_amount, reward_points
-    finally:
-        put_conn(conn)
-
-
-def reject_deposit_mission_request(request_id, admin_id) -> Tuple[bool, str, Optional[str], int, int]:
-    conn = None
-    target_user = None
-    deposit_amount = 0
-    reward_points = 0
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM deposit_mission_requests WHERE id=%s FOR UPDATE", (int(request_id),))
-            req = cur.fetchone()
-            if not req:
-                conn.rollback()
-                return False, "❌ Deposit mission request not found.", None, 0, 0
-
-            target_user = req["user_id"]
-            deposit_amount = safe_int(req.get("deposit_amount"))
-            reward_points = safe_int(req.get("reward_points"))
-
-            if req["status"] != "pending":
-                conn.rollback()
-                return False, f"⚠️ This request was already {req['status']}.", target_user, deposit_amount, reward_points
-
-            cur.execute("""
-                UPDATE deposit_mission_requests
-                SET status='rejected', processed_at=%s, processed_by=%s
-                WHERE id=%s
-            """, (now_iso(), str(admin_id), int(request_id)))
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(admin_id), "reject_deposit_mission", f"request={request_id} target={target_user} RM{deposit_amount} +{reward_points}", now_iso()),
-            )
-        conn.commit()
-        return True, "❌ Deposit Mission Rejected.", target_user, deposit_amount, reward_points
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.exception("reject_deposit_mission_request error: %s", e)
-        return False, "⚠️ Deposit mission reject failed.", target_user, deposit_amount, reward_points
-    finally:
-        put_conn(conn)
-
-
-def approve_gift_request(target_user_id, admin_id) -> Tuple[bool, str, Optional[str]]:
-    """
-    Approve RM38 game credit request
-    WITHOUT adding Telegram reward points
-    """
-    conn = None
-
-    try:
-        conn = get_conn()
-
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-
-            cur.execute(
-                "SELECT * FROM users WHERE user_id=%s FOR UPDATE",
-                (str(target_user_id),)
-            )
-
-            user = cur.fetchone()
-
-            if not user:
-                conn.rollback()
-                return False, "❌ User not found.", None
-
-            if safe_int(user.get("gift_claimed", 0)) == 1:
-                conn.rollback()
-                return False, "⚠️ Gift already approved before.", str(target_user_id)
-
-            cur.execute("""
-                SELECT * FROM gift_requests
-                WHERE user_id=%s AND status='pending'
-                ORDER BY id DESC
-                LIMIT 1
-                FOR UPDATE
-            """, (str(target_user_id),))
-
-            gift_req = cur.fetchone()
-
-            # ONLY mark as claimed
-            # DO NOT ADD REWARD POINTS
-            cur.execute("""
-                UPDATE users
-                SET gift_claimed=1
-                WHERE user_id=%s
-            """, (str(target_user_id),))
-
-            if gift_req:
-                cur.execute("""
-                    UPDATE gift_requests
-                    SET status='approved', processed_at=%s, processed_by=%s
-                    WHERE id=%s
-                """, (now_iso(), str(admin_id), gift_req["id"]))
-
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (
-                    str(admin_id),
-                    "approve_gift",
-                    f"target={target_user_id} RM38_GAME_CREDIT",
-                    now_iso(),
-                ),
-            )
-
-        conn.commit()
-
-        return True, "✅ Gift Approved. RM38 game credit confirmed.", str(target_user_id)
-
-    except Exception as e:
-
-        if conn:
-            conn.rollback()
-
-        logger.exception("approve_gift_request error: %s", e)
-
-        return False, "⚠️ Gift approval failed.", str(target_user_id)
-
-    finally:
-        put_conn(conn)
-
-
-def reject_gift_request(target_user_id, admin_id) -> Tuple[bool, str, Optional[str]]:
-    conn = None
-    try:
-        conn = get_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT * FROM gift_requests
-                WHERE user_id=%s AND status='pending'
-                ORDER BY id DESC
-                LIMIT 1
-                FOR UPDATE
-            """, (str(target_user_id),))
-            req = cur.fetchone()
-            if req:
-                cur.execute("""
-                    UPDATE gift_requests
-                    SET status='rejected', processed_at=%s, processed_by=%s
-                    WHERE id=%s
-                """, (now_iso(), str(admin_id), req["id"]))
-            cur.execute(
-                "INSERT INTO audit_logs (user_id, action, detail, created_at) VALUES (%s,%s,%s,%s)",
-                (str(admin_id), "reject_gift", f"target={target_user_id}", now_iso()),
-            )
-        conn.commit()
-        return True, "❌ Gift Rejected.", str(target_user_id)
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.exception("reject_gift_request error: %s", e)
-        return False, "⚠️ Gift reject failed. Please check logs.", str(target_user_id)
-    finally:
-        put_conn(conn)
+    await support_close_visible_message(context, target_user_id, source_message=update.effective_message.reply_to_message if update.effective_message else None)
+    await update.effective_message.reply_text(f"✅ Closed. Check back: /chatlog {target_user_id}")
+
+
+async def support_recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Use: /recall LOG_ID\n也可以按 ✅ Sent 下面的 Recall 按钮。")
+        return
+    ok, msg = await support_recall_sent_message(context, context.args[0], update.effective_user)
+    await update.effective_message.reply_text(msg)
 
 
 # ================= UI / LANGUAGE =================
@@ -3961,6 +3593,15 @@ def build_app():
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("chatid", chatid_cmd))
     app.add_handler(CommandHandler("support", support_cmd))
+    app.add_handler(CommandHandler("qr", support_qr_cmd))
+    app.add_handler(CommandHandler("more", support_more_cmd))
+    app.add_handler(CommandHandler("info", support_info_cmd))
+    app.add_handler(CommandHandler("history", support_history_cmd))
+    app.add_handler(CommandHandler("chatlog", support_chatlog_cmd))
+    app.add_handler(CommandHandler("chats", support_chats_cmd))
+    app.add_handler(CommandHandler("closed", support_closed_cmd))
+    app.add_handler(CommandHandler("close", support_close_cmd))
+    app.add_handler(CommandHandler("recall", support_recall_cmd))
     app.add_handler(MessageHandler(filters.CONTACT & filters.ChatType.PRIVATE, contact_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_phone_handler))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, customer_private_media_handler))
