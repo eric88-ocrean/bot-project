@@ -807,7 +807,7 @@ def support_quick_reply_buttons(target_user_id):
             InlineKeyboardButton("✅ Done Reply", callback_data=f"sup_qr_done:{target_user_id}"),
         ],
         [
-            InlineKeyboardButton("⬅️ Hide", callback_data=f"sup_hide:{target_user_id}"),
+            InlineKeyboardButton("⬅️ Back", callback_data=f"sup_hide:{target_user_id}"),
         ],
     ])
 
@@ -836,7 +836,7 @@ def support_more_buttons(target_user_id):
             InlineKeyboardButton("✅ Unban", callback_data=f"sup_unban:{target_user_id}"),
         ],
         [
-            InlineKeyboardButton("⬅️ Hide", callback_data=f"sup_hide:{target_user_id}"),
+            InlineKeyboardButton("⬅️ Back", callback_data=f"sup_hide:{target_user_id}"),
         ],
     ])
 
@@ -1035,34 +1035,174 @@ def support_points_text(target_user_id):
     )
 
 
-async def support_edit_or_reply_panel(query, text, reply_markup):
+async def support_edit_card(message, text, reply_markup=None):
+    """Edit the existing support card instead of sending another group message."""
+    if not message:
+        return False
+    short_text = str(text or "")
     try:
-        await query.message.reply_text(text, reply_markup=reply_markup)
-    except Exception:
-        await query.message.reply_text(text)
-
-
-async def support_hide_panel(query):
-    try:
-        await query.message.delete()
-        return
+        if getattr(message, "text", None):
+            await message.edit_text(short_text[:4096], reply_markup=reply_markup)
+            return True
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return True
     except Exception:
         pass
+
     try:
-        await query.message.edit_text("⬅️ Panel hidden.")
+        await message.edit_caption(caption=short_text[:1024], reply_markup=reply_markup)
+        return True
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return True
     except Exception:
+        pass
+
+    try:
+        await message.edit_reply_markup(reply_markup=reply_markup)
+        return True
+    except Exception:
+        return False
+
+
+def support_latest_customer_log(target_user_id):
+    try:
+        return db_fetchone(
+            """
+            SELECT * FROM support_chat_logs
+            WHERE user_id=%s AND direction='customer_to_support'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (str(target_user_id),),
+        )
+    except Exception:
+        return None
+
+
+def support_customer_summary_text(target_user_id, title="🟡 NEW MESSAGE", note="", message_label="💬 Message"):
+    row = get_user(target_user_id) or {}
+    ticket = support_get_ticket(target_user_id) or {}
+    latest = support_latest_customer_log(target_user_id) or {}
+    phone = row.get("phone_number") or "Not Verified"
+    name = row.get("name") or "Customer"
+    status = SUPPORT_STATUS_LABELS.get(ticket.get("status") or "open", ticket.get("status") or "open")
+    assigned = ticket.get("assigned_name") or "-"
+    priority = "🔥 Urgent" if ticket.get("priority") == "urgent" else "Normal"
+    content = (latest.get("content") or "").strip() or "-"
+    if len(content) > 800:
+        content = content[:800] + "…"
+
+    parts = [
+        str(title),
+        "",
+        f"👤 {name}",
+        f"📱 {phone}",
+        f"🆔 {target_user_id}",
+        f"📌 {status}",
+    ]
+    if assigned != "-" or priority != "Normal":
+        parts.append(f"👤 Assigned: {assigned}")
+        parts.append(f"⚡ Priority: {priority}")
+    if note:
+        parts.extend(["", str(note)])
+    parts.extend(["", "━━━━━━━━━━━━━━", f"{message_label}:", content])
+    return "\n".join(parts)
+
+
+def support_quick_panel_text(target_user_id):
+    return support_customer_summary_text(
+        target_user_id,
+        title="⚡ QUICK REPLY",
+        note="选择一个快捷回复，会直接发送给顾客。",
+        message_label="Last customer message",
+    )
+
+
+def support_more_panel_text(target_user_id):
+    return support_customer_summary_text(
+        target_user_id,
+        title="📂 MORE ACTIONS",
+        note="高级功能：查看资料、积分、Assign、Ban / Unban。",
+        message_label="Last customer message",
+    )
+
+
+def support_action_card_text(target_user_id, title="🟢 REPLIED", action_note="", message_label="Last customer message"):
+    return support_customer_summary_text(
+        target_user_id,
+        title=title,
+        note=action_note,
+        message_label=message_label,
+    )
+
+
+def support_closed_buttons(target_user_id, log_id=0):
+    target_user_id = str(target_user_id)
+    rows = []
+    if log_id:
+        rows.append([InlineKeyboardButton("↩️ Recall sent message", callback_data=f"sup_recall:{int(log_id)}")])
+    rows.append([InlineKeyboardButton("📜 Chat Log", callback_data=f"sup_chatlog:{target_user_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def support_after_reply_buttons(target_user_id, log_id=0):
+    target_user_id = str(target_user_id)
+    rows = []
+    if log_id:
+        rows.append([InlineKeyboardButton("↩️ Recall sent message", callback_data=f"sup_recall:{int(log_id)}")])
+    rows.extend([
+        [
+            InlineKeyboardButton("⚡ Quick Reply", callback_data=f"sup_panel_qr:{target_user_id}"),
+            InlineKeyboardButton("✅ Close", callback_data=f"sup_status_done:{target_user_id}"),
+        ],
+        [
+            InlineKeyboardButton("📂 More", callback_data=f"sup_panel_more:{target_user_id}"),
+            InlineKeyboardButton("📜 Chat Log", callback_data=f"sup_chatlog:{target_user_id}"),
+        ],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def support_edit_or_reply_panel(query, text, reply_markup):
+    # Single-card mode: edit the same customer card instead of creating a new message.
+    ok = await support_edit_card(query.message, text, reply_markup)
+    if not ok:
         try:
-            await query.message.edit_reply_markup(reply_markup=None)
+            await query.message.reply_text(text[:4096], reply_markup=reply_markup)
         except Exception:
             pass
 
 
-async def support_close_visible_message(context, target_user_id, source_message=None):
-    """Try to collapse the last customer message into a short closed summary and remove buttons."""
+async def support_hide_panel(query):
+    # In single-card mode, Hide means return to the compact main customer card.
+    try:
+        data = query.data or ""
+        target_user_id = data.split(":", 1)[1]
+    except Exception:
+        target_user_id = None
+    if target_user_id:
+        await support_edit_card(
+            query.message,
+            support_customer_summary_text(target_user_id),
+            support_main_buttons(target_user_id),
+        )
+        return
+    try:
+        await query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+async def support_close_visible_message(context, target_user_id, source_message=None, reply_markup=None):
+    """Collapse the visible support card into a short closed summary."""
     text = support_closed_summary_text(target_user_id)
     ticket = support_get_ticket(target_user_id) or {}
     support_id = get_support_group_id()
     target_mid = safe_int(ticket.get("last_group_message_id", 0))
+    if reply_markup is None:
+        reply_markup = support_closed_buttons(target_user_id)
 
     if support_id and target_mid:
         try:
@@ -1070,9 +1210,12 @@ async def support_close_visible_message(context, target_user_id, source_message=
                 chat_id=support_id,
                 message_id=target_mid,
                 text=text,
-                reply_markup=None,
+                reply_markup=reply_markup,
             )
             return True
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return True
         except Exception:
             pass
         try:
@@ -1080,27 +1223,17 @@ async def support_close_visible_message(context, target_user_id, source_message=
                 chat_id=support_id,
                 message_id=target_mid,
                 caption=text[:1024],
-                reply_markup=None,
+                reply_markup=reply_markup,
             )
             return True
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return True
         except Exception:
             pass
 
     if source_message:
-        try:
-            if source_message.text:
-                await source_message.edit_text(text, reply_markup=None)
-                return True
-            if source_message.caption:
-                await source_message.edit_caption(text[:1024], reply_markup=None)
-                return True
-        except Exception:
-            pass
-        try:
-            await source_message.edit_reply_markup(reply_markup=None)
-            return True
-        except Exception:
-            pass
+        return await support_edit_card(source_message, text, reply_markup)
     return False
 
 
@@ -1369,10 +1502,23 @@ async def support_group_reply_handler(update: Update, context: ContextTypes.DEFA
             admin_id=update.effective_user.id,
             admin_name=update.effective_user.full_name,
         )
+
+        await support_edit_card(
+            replied,
+            support_action_card_text(
+                target_user_id,
+                title="🟢 REPLIED",
+                action_note=f"✅ Reply sent by {update.effective_user.full_name}",
+            ),
+            support_after_reply_buttons(target_user_id, log_id),
+        )
+
+        # Keep support group clean. If bot has delete permission, remove the staff reply after forwarding.
         try:
-            await msg.reply_text("✅ Sent", reply_markup=support_recall_keyboard(log_id))
+            await msg.delete()
         except Exception:
             pass
+
         audit_log(update.effective_user.id, "support_reply", f"target={target_user_id}")
 
     except Forbidden:
@@ -1411,19 +1557,32 @@ async def support_recall_sent_message(context: ContextTypes.DEFAULT_TYPE, log_id
 async def handle_support_callback(query, data: str, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not is_admin(query.from_user.id):
-            await query.message.reply_text("❌ Admin only.")
+            await query.answer("Admin only", show_alert=True)
             return
 
         if data.startswith("sup_recall:"):
             log_id = data.split(":", 1)[1]
+            log = support_get_log(log_id)
+            target_user_id = str((log or {}).get("user_id") or "")
             ok, msg = await support_recall_sent_message(context, log_id, query.from_user)
-            await query.message.reply_text(msg)
+            if target_user_id:
+                await support_edit_card(
+                    query.message,
+                    support_action_card_text(
+                        target_user_id,
+                        title="↩️ RECALL UPDATE",
+                        action_note=msg,
+                    ),
+                    support_main_buttons(target_user_id),
+                )
+            else:
+                await query.answer(msg, show_alert=True)
             return
 
         try:
             action, target_user_id = data.split(":", 1)
         except ValueError:
-            await query.message.reply_text("⚠️ Invalid support button.")
+            await query.answer("Invalid support button", show_alert=True)
             return
 
         target_user_id = str(target_user_id).strip()
@@ -1431,14 +1590,14 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
         if action == "sup_panel_qr":
             await support_edit_or_reply_panel(
                 query,
-                f"⚡ Quick Reply Panel\n\nCustomer: {target_user_id}",
+                support_quick_panel_text(target_user_id),
                 support_quick_reply_buttons(target_user_id),
             )
 
         elif action == "sup_panel_more":
             await support_edit_or_reply_panel(
                 query,
-                f"📂 More Actions\n\nCustomer: {target_user_id}",
+                support_more_panel_text(target_user_id),
                 support_more_buttons(target_user_id),
             )
 
@@ -1446,17 +1605,33 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
             await support_hide_panel(query)
 
         elif action == "sup_profile":
-            await query.message.reply_text(support_profile_text(target_user_id))
+            await support_edit_card(
+                query.message,
+                support_profile_text(target_user_id),
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"sup_panel_more:{target_user_id}")]]),
+            )
 
         elif action == "sup_points":
-            await query.message.reply_text(support_points_text(target_user_id))
+            await support_edit_card(
+                query.message,
+                support_points_text(target_user_id),
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"sup_panel_more:{target_user_id}")]]),
+            )
 
         elif action == "sup_chatlog":
-            await query.message.reply_text(support_chatlog_text(target_user_id, limit=20)[:3900])
+            await support_edit_card(
+                query.message,
+                support_chatlog_text(target_user_id, limit=20)[:3900],
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"sup_panel_more:{target_user_id}")]]),
+            )
 
         elif action == "sup_phone":
             row = get_user(target_user_id) or {}
-            await query.message.reply_text(row.get("phone_number") or "Not Verified")
+            await support_edit_card(
+                query.message,
+                f"📱 Phone\n\n{row.get('phone_number') or 'Not Verified'}",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"sup_panel_more:{target_user_id}")]]),
+            )
 
         elif action == "sup_assign":
             support_touch_ticket(
@@ -1465,10 +1640,14 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
                 assigned_to=query.from_user.id,
                 assigned_name=query.from_user.full_name,
             )
-            await query.message.reply_text(
-                "👤 Assigned\n\n"
-                f"Customer: {target_user_id}\n"
-                f"Assigned to: {query.from_user.full_name}"
+            await support_edit_card(
+                query.message,
+                support_action_card_text(
+                    target_user_id,
+                    title="👤 ASSIGNED",
+                    action_note=f"Assigned to: {query.from_user.full_name}",
+                ),
+                support_main_buttons(target_user_id),
             )
             audit_log(query.from_user.id, "support_assign", f"target={target_user_id}")
 
@@ -1486,14 +1665,22 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
             )
             label = SUPPORT_STATUS_LABELS.get(status, status)
             if final_status == "done":
-                await support_close_visible_message(context, target_user_id, source_message=query.message)
-                await query.message.reply_text(f"✅ Closed. Check back anytime: /chatlog {target_user_id}")
+                await support_close_visible_message(
+                    context,
+                    target_user_id,
+                    source_message=query.message,
+                    reply_markup=support_closed_buttons(target_user_id),
+                )
             else:
-                await query.message.reply_text(
-                    "📌 Ticket Updated\n\n"
-                    f"Customer: {target_user_id}\n"
-                    f"Status: {label}\n"
-                    f"By: {query.from_user.full_name}"
+                title = "🔥 URGENT" if status == "urgent" else ("🟡 PENDING" if status == "pending" else "🟢 REPLIED")
+                await support_edit_card(
+                    query.message,
+                    support_action_card_text(
+                        target_user_id,
+                        title=title,
+                        action_note=f"📌 Status updated: {label}\nBy: {query.from_user.full_name}",
+                    ),
+                    support_main_buttons(target_user_id),
                 )
             audit_log(query.from_user.id, "support_status", f"target={target_user_id} status={status}")
 
@@ -1516,51 +1703,53 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
                 closed_by=query.from_user.id if new_status == "done" else None,
             )
             if action == "sup_qr_done":
-                await support_close_visible_message(context, target_user_id, source_message=query.message)
-                await query.message.reply_text(
-                    f"✅ Done reply sent and chat closed.\nCheck back: /chatlog {target_user_id}",
-                    reply_markup=support_recall_keyboard(log_id),
+                await support_close_visible_message(
+                    context,
+                    target_user_id,
+                    source_message=query.message,
+                    reply_markup=support_closed_buttons(target_user_id, log_id),
                 )
             else:
-                await query.message.reply_text(
-                    f"✅ Quick reply sent: {label}",
-                    reply_markup=support_recall_keyboard(log_id),
+                await support_edit_card(
+                    query.message,
+                    support_action_card_text(
+                        target_user_id,
+                        title="🟢 REPLIED",
+                        action_note=f"✅ Quick reply sent: {label}\nBy: {query.from_user.full_name}",
+                    ),
+                    support_after_reply_buttons(target_user_id, log_id),
                 )
 
         elif action == "sup_ban":
             set_user_banned(target_user_id, True)
-            row = get_user(target_user_id) or {}
-            await query.message.reply_text(
-                "🚫 User Banned\n\n"
-                f"Name: {row.get('name') or 'User'}\n"
-                f"ID: {target_user_id}\n"
-                f"Phone: {row.get('phone_number') or 'Not Verified'}"
+            await support_edit_card(
+                query.message,
+                support_action_card_text(target_user_id, title="🚫 USER BANNED", action_note="This user is banned from support relay."),
+                support_more_buttons(target_user_id),
             )
             audit_log(query.from_user.id, "support_ban_user", f"target={target_user_id}")
 
         elif action == "sup_unban":
             set_user_banned(target_user_id, False)
-            row = get_user(target_user_id) or {}
-            await query.message.reply_text(
-                "✅ User Unbanned\n\n"
-                f"Name: {row.get('name') or 'User'}\n"
-                f"ID: {target_user_id}\n"
-                f"Phone: {row.get('phone_number') or 'Not Verified'}"
+            await support_edit_card(
+                query.message,
+                support_action_card_text(target_user_id, title="✅ USER UNBANNED", action_note="This user can contact support again."),
+                support_more_buttons(target_user_id),
             )
             audit_log(query.from_user.id, "support_unban_user", f"target={target_user_id}")
 
         else:
-            await query.message.reply_text("⚠️ Unknown support button.")
+            await query.answer("Unknown support button", show_alert=True)
 
     except Forbidden:
         try:
-            await query.message.reply_text("❌ Customer blocked the bot or cannot receive messages.")
+            await query.answer("Customer blocked the bot or cannot receive messages.", show_alert=True)
         except Exception:
             pass
     except Exception as e:
         logger.exception("handle_support_callback failed: %s", e)
         try:
-            await query.message.reply_text("⚠️ Support action failed.")
+            await query.answer("Support action failed", show_alert=True)
         except Exception:
             pass
 
@@ -1578,10 +1767,20 @@ async def support_qr_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target_user_id:
         await update.effective_message.reply_text("Reply 顾客那条消息，然后输入 /qr")
         return
-    await update.effective_message.reply_text(
-        f"⚡ Quick Reply Panel\n\nCustomer: {target_user_id}",
-        reply_markup=support_quick_reply_buttons(target_user_id),
+    edited = await support_edit_card(
+        update.effective_message.reply_to_message,
+        support_quick_panel_text(target_user_id),
+        support_quick_reply_buttons(target_user_id),
     )
+    try:
+        await update.effective_message.delete()
+    except Exception:
+        pass
+    if not edited:
+        await update.effective_message.reply_text(
+            support_quick_panel_text(target_user_id),
+            reply_markup=support_quick_reply_buttons(target_user_id),
+        )
 
 
 async def support_more_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1591,10 +1790,20 @@ async def support_more_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target_user_id:
         await update.effective_message.reply_text("Reply 顾客那条消息，然后输入 /more")
         return
-    await update.effective_message.reply_text(
-        f"📂 More Actions\n\nCustomer: {target_user_id}",
-        reply_markup=support_more_buttons(target_user_id),
+    edited = await support_edit_card(
+        update.effective_message.reply_to_message,
+        support_more_panel_text(target_user_id),
+        support_more_buttons(target_user_id),
     )
+    try:
+        await update.effective_message.delete()
+    except Exception:
+        pass
+    if not edited:
+        await update.effective_message.reply_text(
+            support_more_panel_text(target_user_id),
+            reply_markup=support_more_buttons(target_user_id),
+        )
 
 
 async def support_info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1653,8 +1862,14 @@ async def support_close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         assigned_name=update.effective_user.full_name,
         closed_by=update.effective_user.id,
     )
-    await support_close_visible_message(context, target_user_id, source_message=update.effective_message.reply_to_message if update.effective_message else None)
-    await update.effective_message.reply_text(f"✅ Closed. Check back: /chatlog {target_user_id}")
+    source = update.effective_message.reply_to_message if update.effective_message else None
+    ok = await support_close_visible_message(context, target_user_id, source_message=source)
+    try:
+        await update.effective_message.delete()
+    except Exception:
+        pass
+    if not ok:
+        await update.effective_message.reply_text(f"✅ Closed. Check back: /chatlog {target_user_id}")
 
 
 async def support_recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
