@@ -2429,6 +2429,7 @@ async def text_phone_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ensure_user(user_id, user_name)
 
         if is_phone_verified(user_id):
+            await relay_customer_to_support(update, context)
             return
 
         text = (update.effective_message.text or "").strip()
