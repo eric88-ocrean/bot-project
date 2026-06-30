@@ -64,7 +64,7 @@ SUPPORT_GROUP_ID = os.getenv("SUPPORT_GROUP_ID", SUPERVISOR_GROUP_ID).strip()
 
 CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/jomjudi88cuci")
 GROUP_URL = os.getenv("GROUP_URL", "https://t.me/jomjudi88official")
-REGISTER_URL = os.getenv("REGISTER_URL", "https://jomjudi88.live/my/register/?referral=JJ27817922")
+REGISTER_URL = os.getenv("REGISTER_URL", "https://jomjudi88a.com/my/")
 JOM_REWARDS_URL = os.getenv("JOM_REWARDS_URL", "https://jom-rewards.atoms.world/")
 AMOI_MANJA_URL = os.getenv("AMOI_MANJA_URL", "https://t.me/JomJManja_bot")
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/JomJudi88vip")
