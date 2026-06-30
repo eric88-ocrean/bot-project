@@ -295,6 +295,9 @@ def init_db():
                 "created_at TEXT DEFAULT ''",
                 "language TEXT DEFAULT ''",
                 "is_banned INTEGER DEFAULT 0",
+                "ban_reason TEXT DEFAULT ''",
+                "banned_by TEXT DEFAULT ''",
+                "banned_at TEXT DEFAULT ''",
             ]
             for col in user_columns:
                 cur.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col}")
@@ -424,6 +427,16 @@ def init_db():
             for col in support_log_columns:
                 cur.execute(f"ALTER TABLE support_chat_logs ADD COLUMN IF NOT EXISTS {col}")
 
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS support_notes (
+                    user_id TEXT PRIMARY KEY,
+                    note TEXT DEFAULT '',
+                    updated_by TEXT DEFAULT '',
+                    updated_by_name TEXT DEFAULT '',
+                    updated_at TEXT DEFAULT ''
+                )
+            """)
+
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_points ON users(points DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_invites ON users(invited_count DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_phone_number ON users(phone_number)")
@@ -441,6 +454,7 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_support_logs_user ON support_chat_logs(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_support_logs_created ON support_chat_logs(created_at)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_support_logs_direction ON support_chat_logs(direction)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_support_notes_updated ON support_notes(updated_at)")
 
         conn.commit()
         logger.info("Database initialized.")
@@ -548,11 +562,31 @@ def is_user_banned(user_id) -> bool:
         return False
 
 
-def set_user_banned(user_id, banned: bool):
-    db_execute(
-        "UPDATE users SET is_banned=%s WHERE user_id=%s",
-        (1 if banned else 0, str(user_id)),
-    )
+def set_user_banned(user_id, banned: bool, reason="", admin_id="", admin_name=""):
+    if banned:
+        db_execute(
+            """
+            UPDATE users
+            SET is_banned=1,
+                ban_reason=%s,
+                banned_by=%s,
+                banned_at=%s
+            WHERE user_id=%s
+            """,
+            (str(reason or "No reason"), str(admin_id or ""), now_iso(), str(user_id)),
+        )
+    else:
+        db_execute(
+            """
+            UPDATE users
+            SET is_banned=0,
+                ban_reason='',
+                banned_by='',
+                banned_at=''
+            WHERE user_id=%s
+            """,
+            (str(user_id),),
+        )
 
 
 def support_get_ticket(user_id):
@@ -786,6 +820,61 @@ def support_intro_text(user_id=None) -> str:
     )
 
 
+def support_customer_keyboard(user_id=None):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎁 Free RM38", callback_data="faq_rm38"),
+            InlineKeyboardButton("💰 Deposit", callback_data="faq_deposit"),
+        ],
+        [
+            InlineKeyboardButton("🎟 Redeem Reward", callback_data="faq_redeem"),
+            InlineKeyboardButton("📱 Verify Phone", callback_data="faq_phone"),
+        ],
+        [InlineKeyboardButton("👨‍💼 Talk to CS", callback_data="faq_talk")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back")],
+    ])
+
+
+def support_faq_answer(data, user_id=None):
+    if data == "faq_rm38":
+        return (
+            "🎁 Free RM38 领取条件\n\n"
+            "1. 必须是新会员\n"
+            "2. 已注册 JOMJUDI88 账号\n"
+            "3. 首次 deposit RM20+\n"
+            "4. 加入官方 Channel 和 Group\n"
+            "5. 发送 deposit screenshot 给客服审核\n\n"
+            "需要人工帮忙的话，直接输入你的问题或发送 screenshot。"
+        )
+    if data == "faq_deposit":
+        return (
+            "💰 Deposit 教程\n\n"
+            "1. 点击 Daftar / Register 注册或登录账号\n"
+            "2. 进入 Deposit 页面\n"
+            "3. 选择 payment method 并完成付款\n"
+            "4. 完成后发送 deposit screenshot 给客服检查"
+        )
+    if data == "faq_redeem":
+        return (
+            "🎟 Reward 兑换说明\n\n"
+            "1. 先通过 Check In / Share / Deposit Mission 收集 points\n"
+            "2. 点 Kumpul Rewards / Redeem Reward\n"
+            "3. 选择你要换的奖励\n"
+            "4. 等待 Admin 审核\n\n"
+            "客服可以在后台查看 pending redeem。"
+        )
+    if data == "faq_phone":
+        return (
+            "📱 手机验证说明\n\n"
+            "请点击 Telegram 的 Verify Malaysia Number 按钮，分享你的 Telegram 电话号码。\n"
+            "系统只接受 Malaysia 手机号码。\n\n"
+            "如果按钮不见了，请输入 /start 重新开始。"
+        )
+    if data == "faq_talk":
+        return support_intro_text(user_id)
+    return support_intro_text(user_id)
+
+
 def support_main_buttons(target_user_id):
     target_user_id = str(target_user_id)
     return InlineKeyboardMarkup([
@@ -839,11 +928,15 @@ def support_more_buttons(target_user_id):
         ],
         [
             InlineKeyboardButton("📜 Chat Log", callback_data=f"sup_chatlog:{target_user_id}"),
-            InlineKeyboardButton("🔥 Urgent", callback_data=f"sup_status_urgent:{target_user_id}"),
+            InlineKeyboardButton("📝 Note", callback_data=f"sup_note:{target_user_id}"),
         ],
         [
+            InlineKeyboardButton("🔥 Urgent", callback_data=f"sup_status_urgent:{target_user_id}"),
             InlineKeyboardButton("🟡 Pending", callback_data=f"sup_status_pending:{target_user_id}"),
+        ],
+        [
             InlineKeyboardButton("🟢 Replied", callback_data=f"sup_status_replied:{target_user_id}"),
+            InlineKeyboardButton("✅ Close", callback_data=f"sup_status_done:{target_user_id}"),
         ],
         [
             InlineKeyboardButton("🚫 Ban", callback_data=f"sup_ban:{target_user_id}"),
@@ -992,6 +1085,244 @@ def support_lookup_user_id(group_message_id):
     return None
 
 
+
+def support_note_get(user_id):
+    try:
+        row = db_fetchone("SELECT * FROM support_notes WHERE user_id=%s", (str(user_id),))
+        return row or {}
+    except Exception as e:
+        logger.warning("support_note_get failed: %s", e)
+        return {}
+
+
+def support_note_set(user_id, note, admin_id="", admin_name=""):
+    note = str(note or "").strip()
+    db_execute(
+        """
+        INSERT INTO support_notes (user_id, note, updated_by, updated_by_name, updated_at)
+        VALUES (%s,%s,%s,%s,%s)
+        ON CONFLICT (user_id) DO UPDATE SET
+            note=EXCLUDED.note,
+            updated_by=EXCLUDED.updated_by,
+            updated_by_name=EXCLUDED.updated_by_name,
+            updated_at=EXCLUDED.updated_at
+        """,
+        (str(user_id), note[:2000], str(admin_id or ""), str(admin_name or ""), now_iso()),
+    )
+
+
+def support_note_clear(user_id):
+    db_execute("DELETE FROM support_notes WHERE user_id=%s", (str(user_id),))
+
+
+def support_customer_request_counts(user_id):
+    try:
+        return db_fetchone(
+            """
+            SELECT
+                COALESCE((SELECT COUNT(*) FROM gift_requests WHERE user_id=%s),0) AS gift_total,
+                COALESCE((SELECT COUNT(*) FROM gift_requests WHERE user_id=%s AND status='pending'),0) AS gift_pending,
+                COALESCE((SELECT COUNT(*) FROM redeem_requests WHERE user_id=%s),0) AS redeem_total,
+                COALESCE((SELECT COUNT(*) FROM redeem_requests WHERE user_id=%s AND status='pending'),0) AS redeem_pending,
+                COALESCE((SELECT COUNT(*) FROM deposit_mission_requests WHERE user_id=%s),0) AS deposit_total,
+                COALESCE((SELECT COUNT(*) FROM deposit_mission_requests WHERE user_id=%s AND status='pending'),0) AS deposit_pending
+            """,
+            (str(user_id), str(user_id), str(user_id), str(user_id), str(user_id), str(user_id)),
+        ) or {}
+    except Exception as e:
+        logger.warning("support_customer_request_counts failed: %s", e)
+        return {}
+
+
+def support_last_log(user_id, direction=None):
+    try:
+        if direction:
+            return db_fetchone(
+                """
+                SELECT * FROM support_chat_logs
+                WHERE user_id=%s AND direction=%s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (str(user_id), str(direction)),
+            ) or {}
+        return db_fetchone(
+            """
+            SELECT * FROM support_chat_logs
+            WHERE user_id=%s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (str(user_id),),
+        ) or {}
+    except Exception:
+        return {}
+
+
+def dashboard_text():
+    today = today_str()
+    try:
+        row = db_fetchone(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM users) AS total_users,
+                (SELECT COUNT(*) FROM users WHERE phone_verified=1) AS verified_users,
+                (SELECT COUNT(*) FROM users WHERE LEFT(COALESCE(created_at,''),10)=%s) AS new_users_today,
+                (SELECT COUNT(*) FROM users WHERE phone_verified=1 AND LEFT(COALESCE(phone_verified_at,''),10)=%s) AS verified_today,
+                (SELECT COUNT(*) FROM gift_requests WHERE status='pending') AS gift_pending,
+                (SELECT COUNT(*) FROM redeem_requests WHERE status='pending') AS redeem_pending,
+                (SELECT COUNT(*) FROM deposit_mission_requests WHERE status='pending') AS deposit_pending,
+                (SELECT COUNT(*) FROM support_tickets WHERE status IN ('open','pending','urgent')) AS support_open,
+                (SELECT COUNT(*) FROM support_tickets WHERE status='done' AND LEFT(COALESCE(closed_at,''),10)=%s) AS support_closed_today,
+                (SELECT COUNT(*) FROM support_chat_logs WHERE direction='support_to_customer' AND LEFT(COALESCE(created_at,''),10)=%s) AS support_replies_today,
+                (SELECT COALESCE(SUM(points),0) FROM users) AS total_points
+            """,
+            (today, today, today, today),
+        ) or {}
+    except Exception as e:
+        logger.warning("dashboard_text failed: %s", e)
+        row = {}
+
+    return (
+        "📊 JOMJUDI88 Bot Dashboard\n\n"
+        f"👥 Total Users: {safe_int(row.get('total_users'))}\n"
+        f"📱 Verified Users: {safe_int(row.get('verified_users'))}\n"
+        f"🆕 New Users Today: {safe_int(row.get('new_users_today'))}\n"
+        f"✅ Phone Verified Today: {safe_int(row.get('verified_today'))}\n\n"
+        f"🎁 Free RM38 Pending: {safe_int(row.get('gift_pending'))}\n"
+        f"🎟 Redeem Pending: {safe_int(row.get('redeem_pending'))}\n"
+        f"💰 Deposit Mission Pending: {safe_int(row.get('deposit_pending'))}\n\n"
+        f"🎧 Support Open: {safe_int(row.get('support_open'))}\n"
+        f"✅ Support Closed Today: {safe_int(row.get('support_closed_today'))}\n"
+        f"💬 Support Replies Today: {safe_int(row.get('support_replies_today'))}\n\n"
+        f"⭐ Total Points In System: {safe_int(row.get('total_points'))}\n"
+        f"🕒 Updated: {now_iso()}"
+    )
+
+
+def pending_all_text():
+    try:
+        row = db_fetchone(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM gift_requests WHERE status='pending') AS gift_pending,
+                (SELECT COUNT(*) FROM redeem_requests WHERE status='pending') AS redeem_pending,
+                (SELECT COUNT(*) FROM deposit_mission_requests WHERE status='pending') AS deposit_pending,
+                (SELECT COUNT(*) FROM support_tickets WHERE status IN ('open','pending','urgent')) AS support_open,
+                (SELECT COUNT(*) FROM support_tickets WHERE status='pending') AS support_pending,
+                (SELECT COUNT(*) FROM support_tickets WHERE priority='urgent' AND status<>'done') AS support_urgent
+            """
+        ) or {}
+    except Exception:
+        row = {}
+    return (
+        "📌 Pending Center\n\n"
+        f"🎁 Free RM38 Pending: {safe_int(row.get('gift_pending'))}\n"
+        f"🎟 Redeem Reward Pending: {safe_int(row.get('redeem_pending'))}\n"
+        f"💰 Deposit Mission Pending: {safe_int(row.get('deposit_pending'))}\n"
+        f"🎧 Support Open: {safe_int(row.get('support_open'))}\n"
+        f"🟡 Support Pending: {safe_int(row.get('support_pending'))}\n"
+        f"🔥 Support Urgent: {safe_int(row.get('support_urgent'))}\n\n"
+        "Commands:\n"
+        "/pending_gift\n"
+        "/pending_redeem\n"
+        "/pending_deposit\n"
+        "/unreplied"
+    )
+
+
+def unreplied_text(limit=15):
+    try:
+        rows = db_fetchall(
+            """
+            WITH last_logs AS (
+                SELECT DISTINCT ON (user_id) user_id, direction, content, created_at
+                FROM support_chat_logs
+                ORDER BY user_id, id DESC
+            )
+            SELECT ll.*, u.name, u.phone_number, st.status, st.priority, st.assigned_name
+            FROM last_logs ll
+            LEFT JOIN users u ON u.user_id=ll.user_id
+            LEFT JOIN support_tickets st ON st.user_id=ll.user_id
+            WHERE ll.direction='customer_to_support'
+              AND COALESCE(st.status,'open') <> 'done'
+            ORDER BY ll.created_at DESC
+            LIMIT %s
+            """,
+            (int(limit),),
+        ) or []
+    except Exception as e:
+        logger.warning("unreplied_text failed: %s", e)
+        rows = []
+    if not rows:
+        return "✅ Unreplied Support\n\nNo unreplied customer messages."
+    parts = ["⚠️ Unreplied Support Chats"]
+    for i, row in enumerate(rows, 1):
+        priority = "🔥 Urgent" if row.get("priority") == "urgent" else "Normal"
+        content = (row.get("content") or "").strip()[:160]
+        parts.append(
+            f"{i}. {row.get('name') or 'Customer'} | {priority}\n"
+            f"📱 {row.get('phone_number') or 'Not Verified'}\n"
+            f"🆔 {row.get('user_id')}\n"
+            f"💬 {content or '-'}\n"
+            f"🕒 {row.get('created_at') or '-'}\n"
+            f"查看: /chatlog {row.get('user_id')}"
+        )
+    return "\n\n".join(parts)
+
+
+def csstats_text():
+    today = today_str()
+    try:
+        replies = db_fetchall(
+            """
+            SELECT admin_id, COALESCE(NULLIF(admin_name,''), admin_id) AS admin_name, COUNT(*) AS reply_count
+            FROM support_chat_logs
+            WHERE direction='support_to_customer'
+              AND LEFT(COALESCE(created_at,''),10)=%s
+            GROUP BY admin_id, admin_name
+            ORDER BY reply_count DESC
+            """,
+            (today,),
+        ) or []
+        closes = db_fetchall(
+            """
+            SELECT closed_by AS admin_id, COUNT(*) AS close_count
+            FROM support_tickets
+            WHERE status='done'
+              AND LEFT(COALESCE(closed_at,''),10)=%s
+              AND COALESCE(closed_by,'')<>''
+            GROUP BY closed_by
+            """,
+            (today,),
+        ) or []
+    except Exception as e:
+        logger.warning("csstats_text failed: %s", e)
+        replies, closes = [], []
+    close_map = {str(r.get('admin_id')): safe_int(r.get('close_count')) for r in closes}
+    if not replies and not closes:
+        return f"👨‍💼 Customer Service Stats Today\n\nNo support activity today.\nDate: {today}"
+    ids = []
+    names = {}
+    reply_map = {}
+    for r in replies:
+        aid = str(r.get('admin_id') or '')
+        if aid not in ids:
+            ids.append(aid)
+        names[aid] = r.get('admin_name') or aid
+        reply_map[aid] = safe_int(r.get('reply_count'))
+    for aid in close_map:
+        if aid not in ids:
+            ids.append(aid)
+    lines = [f"👨‍💼 Customer Service Stats Today\nDate: {today}"]
+    for aid in ids:
+        lines.append(
+            f"{names.get(aid) or aid}\n"
+            f"✅ Replies: {reply_map.get(aid, 0)}\n"
+            f"✅ Closed: {close_map.get(aid, 0)}"
+        )
+    return "\n\n".join(lines)
+
 def support_profile_text(target_user_id):
     row = get_user(target_user_id)
     if not row:
@@ -1003,13 +1334,23 @@ def support_profile_text(target_user_id):
     status = SUPPORT_STATUS_LABELS.get(ticket.get("status") or "open", ticket.get("status") or "open")
     assigned = ticket.get("assigned_name") or "-"
     priority = "🔥 Urgent" if ticket.get("priority") == "urgent" else "Normal"
+    note = support_note_get(target_user_id)
+    counts = support_customer_request_counts(target_user_id)
+    last_customer = support_last_log(target_user_id, "customer_to_support")
+    last_reply = support_last_log(target_user_id, "support_to_customer")
+    note_text = (note.get("note") or "-").strip() or "-"
+    ban_reason = (row.get("ban_reason") or "-").strip() or "-"
+    banned_at = (row.get("banned_at") or "-").strip() or "-"
+
     return (
         "👤 Customer Profile\n\n"
         f"Name: {row.get('name') or 'User'}\n"
         f"User ID: {row.get('user_id')}\n"
         f"Phone: {row.get('phone_number') or 'Not Verified'}\n"
         f"Verified: {verified}\n"
-        f"Banned: {banned}\n\n"
+        f"Banned: {banned}\n"
+        f"Ban Reason: {ban_reason}\n"
+        f"Banned At: {banned_at}\n\n"
         f"⭐ Points: {safe_int(row.get('points', 0))}\n"
         f"👥 Invites: {safe_int(row.get('invited_count', 0))}\n"
         f"🎁 RM38 Claimed: {'Yes' if safe_int(row.get('gift_claimed', 0)) == 1 else 'No'}\n"
@@ -1017,10 +1358,15 @@ def support_profile_text(target_user_id):
         f"📌 Ticket Status: {status}\n"
         f"👤 Assigned: {assigned}\n"
         f"⚡ Priority: {priority}\n\n"
+        f"🎁 Gift Requests: {safe_int(counts.get('gift_total'))} total / {safe_int(counts.get('gift_pending'))} pending\n"
+        f"🎟 Redeem Requests: {safe_int(counts.get('redeem_total'))} total / {safe_int(counts.get('redeem_pending'))} pending\n"
+        f"💰 Deposit Missions: {safe_int(counts.get('deposit_total'))} total / {safe_int(counts.get('deposit_pending'))} pending\n\n"
+        f"📝 Note: {note_text}\n"
+        f"Last Customer Msg: {(last_customer.get('content') or '-')[:120]}\n"
+        f"Last CS Reply: {(last_reply.get('content') or '-')[:120]}\n\n"
         f"Created: {row.get('created_at') or '-'}\n"
         f"Last Seen: {row.get('last_seen_at') or '-'}"
     )
-
 
 def support_points_text(target_user_id):
     row = get_user(target_user_id)
@@ -1468,6 +1814,19 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
         elif action == "sup_chatlog":
             await query.message.reply_text(support_chatlog_text(target_user_id, limit=20)[:3900])
 
+        elif action == "sup_note":
+            note = support_note_get(target_user_id)
+            note_value = (note.get("note") or "-") if note else "-"
+            await query.message.reply_text(
+                "📝 Customer Note\n\n"
+                f"Customer: {target_user_id}\n"
+                f"Note: {note_value}\n\n"
+                "Add/update note:\n"
+                f"/note {target_user_id} your note here\n\n"
+                "Clear note:\n"
+                f"/clearnote {target_user_id}"
+            )
+
         elif action == "sup_phone":
             row = get_user(target_user_id) or {}
             await query.message.reply_text(row.get("phone_number") or "Not Verified")
@@ -1555,7 +1914,7 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
             )
 
         elif action == "sup_ban":
-            set_user_banned(target_user_id, True)
+            set_user_banned(target_user_id, True, reason="Banned from support button", admin_id=query.from_user.id, admin_name=query.from_user.full_name)
             row = get_user(target_user_id) or {}
             await query.message.reply_text(
                 "🚫 User Banned\n\n"
@@ -3615,7 +3974,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(query, get_language_text(), get_language_keyboard())
             return
 
-        if not is_admin(user_id) and safe_int(user.get("phone_verified", 0)) != 1 and data != "support":
+        if not is_admin(user_id) and safe_int(user.get("phone_verified", 0)) != 1 and data != "support" and not data.startswith("faq_"):
             await safe_reply(
                 query,
 tr(user_id, "must_verify")
@@ -3966,7 +4325,10 @@ tr(user_id, "must_verify")
             await safe_edit(query, tr(user_id, "community_text"), keyboard)
 
         elif data == "support":
-            await safe_edit(query, support_intro_text(user_id), kb_back_home(user_id))
+            await safe_edit(query, support_intro_text(user_id), support_customer_keyboard(user_id))
+
+        elif data.startswith("faq_"):
+            await safe_edit(query, support_faq_answer(data, user_id), support_customer_keyboard(user_id))
 
         elif data == "back":
             await safe_edit(query, get_main_text(user_id), get_main_keyboard(user_id))
@@ -4488,6 +4850,106 @@ async def share_earn_reminder_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 
+async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    await update.effective_message.reply_text(dashboard_text()[:3900])
+
+
+async def pending_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    await update.effective_message.reply_text(pending_all_text()[:3900])
+
+
+async def unreplied_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    await update.effective_message.reply_text(unreplied_text(limit=15)[:3900])
+
+
+async def csstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    await update.effective_message.reply_text(csstats_text()[:3900])
+
+
+def _command_target_from_reply_or_args(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_user_id = support_command_target_from_reply(update)
+    if not target_user_id and context.args:
+        target_user_id = context.args[0]
+    return target_user_id
+
+
+async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    target_user_id = support_command_target_from_reply(update)
+    if target_user_id:
+        note_text = " ".join(context.args).strip()
+    else:
+        if len(context.args) < 2:
+            await update.effective_message.reply_text("Use: /note USER_ID note text\n或 Reply 顾客消息输入 /note note text")
+            return
+        target_user_id = context.args[0]
+        note_text = " ".join(context.args[1:]).strip()
+    if not note_text:
+        await update.effective_message.reply_text("Note cannot be empty.")
+        return
+    support_note_set(target_user_id, note_text, update.effective_user.id, update.effective_user.full_name)
+    audit_log(update.effective_user.id, "support_note_set", f"target={target_user_id}")
+    await update.effective_message.reply_text(f"✅ Note saved for {target_user_id}\n\n{note_text[:500]}")
+
+
+async def clearnote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    target_user_id = _command_target_from_reply_or_args(update, context)
+    if not target_user_id:
+        await update.effective_message.reply_text("Use: /clearnote USER_ID\n或 Reply 顾客消息输入 /clearnote")
+        return
+    support_note_clear(target_user_id)
+    audit_log(update.effective_user.id, "support_note_clear", f"target={target_user_id}")
+    await update.effective_message.reply_text(f"✅ Note cleared for {target_user_id}")
+
+
+async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    target_user_id = support_command_target_from_reply(update)
+    if target_user_id:
+        reason = " ".join(context.args).strip() or "No reason"
+    else:
+        if not context.args:
+            await update.effective_message.reply_text("Use: /ban USER_ID reason\n或 Reply 顾客消息输入 /ban reason")
+            return
+        target_user_id = context.args[0]
+        reason = " ".join(context.args[1:]).strip() or "No reason"
+    set_user_banned(target_user_id, True, reason=reason, admin_id=update.effective_user.id, admin_name=update.effective_user.full_name)
+    audit_log(update.effective_user.id, "support_ban_with_reason", f"target={target_user_id} reason={reason}")
+    await update.effective_message.reply_text(f"🚫 User banned\n\nID: {target_user_id}\nReason: {reason}")
+
+
+async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    target_user_id = _command_target_from_reply_or_args(update, context)
+    if not target_user_id:
+        await update.effective_message.reply_text("Use: /unban USER_ID\n或 Reply 顾客消息输入 /unban")
+        return
+    set_user_banned(target_user_id, False)
+    audit_log(update.effective_user.id, "support_unban_cmd", f"target={target_user_id}")
+    await update.effective_message.reply_text(f"✅ User unbanned\n\nID: {target_user_id}")
+
+
+async def faq_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id) if update.effective_user else None
+    await update.effective_message.reply_text(
+        support_intro_text(user_id),
+        reply_markup=support_customer_keyboard(user_id),
+    )
+
+
 async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.effective_message.reply_text(
@@ -4501,7 +4963,10 @@ async def chatid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = str(update.effective_user.id) if update.effective_user else None
-        await update.effective_message.reply_text(support_intro_text(user_id))
+        await update.effective_message.reply_text(
+            support_intro_text(user_id),
+            reply_markup=support_customer_keyboard(user_id),
+        )
     except Exception as e:
         logger.exception("support_cmd error: %s", e)
 
@@ -4536,6 +5001,15 @@ def build_app():
     app.add_handler(CommandHandler("closed", support_closed_cmd))
     app.add_handler(CommandHandler("close", support_close_cmd))
     app.add_handler(CommandHandler("recall", support_recall_cmd))
+    app.add_handler(CommandHandler("dashboard", dashboard_cmd))
+    app.add_handler(CommandHandler("pending", pending_all_cmd))
+    app.add_handler(CommandHandler("unreplied", unreplied_cmd))
+    app.add_handler(CommandHandler("csstats", csstats_cmd))
+    app.add_handler(CommandHandler("note", note_cmd))
+    app.add_handler(CommandHandler("clearnote", clearnote_cmd))
+    app.add_handler(CommandHandler("ban", ban_cmd))
+    app.add_handler(CommandHandler("unban", unban_cmd))
+    app.add_handler(CommandHandler("faq", faq_cmd))
     app.add_handler(MessageHandler(filters.CONTACT & filters.ChatType.PRIVATE, contact_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_phone_handler))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, customer_private_media_handler))
