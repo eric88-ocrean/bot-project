@@ -499,32 +499,81 @@ def get_user_phone(user_id) -> str:
 # - Bot-sent support replies can be recalled with the Recall button if Telegram still allows deletion.
 
 SUPPORT_QUICK_REPLIES = {
-    "sup_qr_screen": (
-        "📸 Ask Screenshot",
-        "Boss，请发送 deposit / transaction screenshot 给客服检查，谢谢。",
-    ),
-    "sup_qr_userid": (
-        "🆔 Ask User ID",
-        "Boss，请发送你的游戏账号 User ID / Username 给客服，谢谢。",
-    ),
-    "sup_qr_deposit": (
-        "💰 Deposit Guide",
-        "Boss，充值步骤：\n\n1. 点击 Daftar / Register 注册或登录账号\n2. 进入 Deposit 页面\n3. 选择 payment method 并完成转账\n4. 完成后发送 deposit screenshot 给客服检查。",
-    ),
-    "sup_qr_rm38": (
-        "🎁 RM38 Rules",
-        "Boss，Free RM38 条件：\n\n1. 必须是新会员\n2. 已注册 JOMJUDI88 账号\n3. 首次 deposit RM20+\n4. 加入官方 Channel 和 Group\n5. 发送 deposit screenshot 给客服审核。",
-    ),
-    "sup_qr_wait": (
-        "⏳ Please Wait",
-        "Boss，客服正在帮你检查，请稍等一下。",
-    ),
-    "sup_qr_done": (
-        "✅ Close Chat",
-        "",
-    ),
+    "sup_qr_screen": {
+        "label": "📸 Ask Screenshot",
+        "texts": {
+            "ms": "Boss, sila hantar screenshot deposit / transaction kepada customer service untuk semakan. Terima kasih.",
+            "en": "Boss, please send your deposit / transaction screenshot so our customer service can check. Thank you.",
+            "zh": "Boss，请发送 deposit / transaction screenshot 给客服检查，谢谢。",
+        },
+    },
+    "sup_qr_userid": {
+        "label": "🆔 Ask User ID",
+        "texts": {
+            "ms": "Boss, sila hantar User ID / Username akaun game anda kepada customer service. Terima kasih.",
+            "en": "Boss, please send your game account User ID / Username to customer service. Thank you.",
+            "zh": "Boss，请发送你的游戏账号 User ID / Username 给客服，谢谢。",
+        },
+    },
+    "sup_qr_deposit": {
+        "label": "💰 Deposit Guide",
+        "texts": {
+            "ms": "Boss, cara deposit:\n\n1. Tekan Daftar / Register untuk daftar atau login akaun\n2. Masuk ke halaman Deposit\n3. Pilih payment method dan selesaikan bayaran\n4. Selepas selesai, hantar deposit screenshot kepada customer service untuk semakan.",
+            "en": "Boss, deposit steps:\n\n1. Tap Daftar / Register to register or log in\n2. Go to the Deposit page\n3. Choose a payment method and complete the payment\n4. After deposit, send the deposit screenshot to customer service for checking.",
+            "zh": "Boss，充值步骤：\n\n1. 点击 Daftar / Register 注册或登录账号\n2. 进入 Deposit 页面\n3. 选择 payment method 并完成转账\n4. 完成后发送 deposit screenshot 给客服检查。",
+        },
+    },
+    "sup_qr_rm38": {
+        "label": "🎁 RM38 Rules",
+        "texts": {
+            "ms": "Boss, syarat Free RM38:\n\n1. Mesti ahli baru\n2. Sudah daftar akaun JOMJUDI88\n3. First deposit RM20+\n4. Join official Channel dan Group\n5. Hantar deposit screenshot kepada customer service untuk semakan.",
+            "en": "Boss, Free RM38 conditions:\n\n1. Must be a new member\n2. Must have registered a JOMJUDI88 account\n3. First deposit RM20+\n4. Join the official Channel and Group\n5. Send the deposit screenshot to customer service for review.",
+            "zh": "Boss，Free RM38 条件：\n\n1. 必须是新会员\n2. 已注册 JOMJUDI88 账号\n3. 首次 deposit RM20+\n4. 加入官方 Channel 和 Group\n5. 发送 deposit screenshot 给客服审核。",
+        },
+    },
+    "sup_qr_wait": {
+        "label": "⏳ Please Wait",
+        "texts": {
+            "ms": "Boss, customer service sedang semak untuk anda. Sila tunggu sebentar.",
+            "en": "Boss, customer service is checking for you now. Please wait a moment.",
+            "zh": "Boss，客服正在帮你检查，请稍等一下。",
+        },
+    },
+    "sup_qr_done": {
+        "label": "✅ Close Chat",
+        "texts": {"ms": "", "en": "", "zh": ""},
+    },
 }
 
+
+def support_lang(user_id=None) -> str:
+    try:
+        lang = get_user_language(user_id) if user_id else "ms"
+    except Exception:
+        lang = "ms"
+    return lang if lang in ["ms", "en", "zh"] else "ms"
+
+
+def support_quick_reply_label(action: str) -> str:
+    item = SUPPORT_QUICK_REPLIES.get(action) or {}
+    if isinstance(item, dict):
+        return item.get("label") or action
+    try:
+        return item[0]
+    except Exception:
+        return action
+
+
+def support_quick_reply_text(action: str, user_id=None) -> str:
+    item = SUPPORT_QUICK_REPLIES.get(action) or {}
+    lang = support_lang(user_id)
+    if isinstance(item, dict):
+        texts = item.get("texts") or {}
+        return texts.get(lang) or texts.get("ms") or texts.get("en") or texts.get("zh") or ""
+    try:
+        return item[1]
+    except Exception:
+        return ""
 SUPPORT_STATUS_LABELS = {
     "pending": "🟡 Pending",
     "replied": "🟢 Replied",
@@ -800,80 +849,174 @@ def support_closed_summary_text(target_user_id):
 
 
 def support_intro_text(user_id=None) -> str:
-    lang = get_user_language(user_id) if user_id else "ms"
-    if lang == "zh":
-        return (
-            "🎧 JOMJUDI88 客服\n\n"
-            "请直接在这里输入你的问题，或发送 screenshot / 文件。\n"
-            "客服会尽快回复你。"
-        )
-    if lang == "en":
-        return (
+    lang = support_lang(user_id)
+    messages = {
+        "ms": (
+            "🎧 JOMJUDI88 Customer Service\n\n"
+            "Boss, terus taip masalah anda di sini, atau hantar screenshot / file.\n"
+            "Customer service akan reply secepat mungkin."
+        ),
+        "en": (
             "🎧 JOMJUDI88 Customer Service\n\n"
             "Type your question here, or send a screenshot/file.\n"
             "Our customer service team will reply as soon as possible."
-        )
-    return (
-        "🎧 JOMJUDI88 Customer Service\n\n"
-        "Boss, terus taip masalah anda di sini, atau hantar screenshot / file.\n"
-        "Customer service akan reply secepat mungkin."
-    )
+        ),
+        "zh": (
+            "🎧 JOMJUDI88 客服\n\n"
+            "请直接在这里输入你的问题，或发送 screenshot / 文件。\n"
+            "客服会尽快回复你。"
+        ),
+    }
+    return messages.get(lang, messages["ms"])
 
 
 def support_customer_keyboard(user_id=None):
+    lang = support_lang(user_id)
+    labels = {
+        "ms": {
+            "rm38": "🎁 Free RM38",
+            "deposit": "💰 Cara Deposit",
+            "redeem": "🎟 Tebus Reward",
+            "phone": "📱 Sahkan Telefon",
+            "talk": "👨‍💼 Cakap dengan CS",
+            "back": "⬅️ Kembali",
+        },
+        "en": {
+            "rm38": "🎁 Free RM38",
+            "deposit": "💰 Deposit Guide",
+            "redeem": "🎟 Redeem Reward",
+            "phone": "📱 Verify Phone",
+            "talk": "👨‍💼 Talk to CS",
+            "back": "⬅️ Back",
+        },
+        "zh": {
+            "rm38": "🎁 免费 RM38",
+            "deposit": "💰 存款教程",
+            "redeem": "🎟 兑换奖励",
+            "phone": "📱 验证手机",
+            "talk": "👨‍💼 联系客服",
+            "back": "⬅️ 返回",
+        },
+    }.get(lang)
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🎁 Free RM38", callback_data="faq_rm38"),
-            InlineKeyboardButton("💰 Deposit", callback_data="faq_deposit"),
+            InlineKeyboardButton(labels["rm38"], callback_data="faq_rm38"),
+            InlineKeyboardButton(labels["deposit"], callback_data="faq_deposit"),
         ],
         [
-            InlineKeyboardButton("🎟 Redeem Reward", callback_data="faq_redeem"),
-            InlineKeyboardButton("📱 Verify Phone", callback_data="faq_phone"),
+            InlineKeyboardButton(labels["redeem"], callback_data="faq_redeem"),
+            InlineKeyboardButton(labels["phone"], callback_data="faq_phone"),
         ],
-        [InlineKeyboardButton("👨‍💼 Talk to CS", callback_data="faq_talk")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="back")],
+        [InlineKeyboardButton(labels["talk"], callback_data="faq_talk")],
+        [InlineKeyboardButton(labels["back"], callback_data="back")],
     ])
 
 
 def support_faq_answer(data, user_id=None):
-    if data == "faq_rm38":
-        return (
-            "🎁 Free RM38 领取条件\n\n"
-            "1. 必须是新会员\n"
-            "2. 已注册 JOMJUDI88 账号\n"
-            "3. 首次 deposit RM20+\n"
-            "4. 加入官方 Channel 和 Group\n"
-            "5. 发送 deposit screenshot 给客服审核\n\n"
-            "需要人工帮忙的话，直接输入你的问题或发送 screenshot。"
-        )
-    if data == "faq_deposit":
-        return (
-            "💰 Deposit 教程\n\n"
-            "1. 点击 Daftar / Register 注册或登录账号\n"
-            "2. 进入 Deposit 页面\n"
-            "3. 选择 payment method 并完成付款\n"
-            "4. 完成后发送 deposit screenshot 给客服检查"
-        )
-    if data == "faq_redeem":
-        return (
-            "🎟 Reward 兑换说明\n\n"
-            "1. 先通过 Check In / Share / Deposit Mission 收集 points\n"
-            "2. 点 Kumpul Rewards / Redeem Reward\n"
-            "3. 选择你要换的奖励\n"
-            "4. 等待 Admin 审核\n\n"
-            "客服可以在后台查看 pending redeem。"
-        )
-    if data == "faq_phone":
-        return (
-            "📱 手机验证说明\n\n"
-            "请点击 Telegram 的 Verify Malaysia Number 按钮，分享你的 Telegram 电话号码。\n"
-            "系统只接受 Malaysia 手机号码。\n\n"
-            "如果按钮不见了，请输入 /start 重新开始。"
-        )
+    lang = support_lang(user_id)
+    answers = {
+        "faq_rm38": {
+            "ms": (
+                "🎁 Syarat Free RM38\n\n"
+                "1. Mesti ahli baru\n"
+                "2. Sudah daftar akaun JOMJUDI88\n"
+                "3. First deposit RM20+\n"
+                "4. Join official Channel dan Group\n"
+                "5. Hantar deposit screenshot kepada customer service untuk semakan\n\n"
+                "Jika perlukan bantuan staff, terus taip masalah anda atau hantar screenshot."
+            ),
+            "en": (
+                "🎁 Free RM38 Conditions\n\n"
+                "1. Must be a new member\n"
+                "2. Must have registered a JOMJUDI88 account\n"
+                "3. First deposit RM20+\n"
+                "4. Join the official Channel and Group\n"
+                "5. Send the deposit screenshot to customer service for review\n\n"
+                "If you need staff assistance, type your issue here or send a screenshot."
+            ),
+            "zh": (
+                "🎁 Free RM38 领取条件\n\n"
+                "1. 必须是新会员\n"
+                "2. 已注册 JOMJUDI88 账号\n"
+                "3. 首次 deposit RM20+\n"
+                "4. 加入官方 Channel 和 Group\n"
+                "5. 发送 deposit screenshot 给客服审核\n\n"
+                "需要人工帮忙的话，直接输入你的问题或发送 screenshot。"
+            ),
+        },
+        "faq_deposit": {
+            "ms": (
+                "💰 Cara Deposit\n\n"
+                "1. Tekan Daftar / Register untuk daftar atau login akaun\n"
+                "2. Masuk ke halaman Deposit\n"
+                "3. Pilih payment method dan selesaikan bayaran\n"
+                "4. Selepas deposit, hantar deposit screenshot kepada customer service untuk semakan"
+            ),
+            "en": (
+                "💰 Deposit Guide\n\n"
+                "1. Tap Daftar / Register to register or log in\n"
+                "2. Go to the Deposit page\n"
+                "3. Choose a payment method and complete the payment\n"
+                "4. After deposit, send the deposit screenshot to customer service for checking"
+            ),
+            "zh": (
+                "💰 Deposit 教程\n\n"
+                "1. 点击 Daftar / Register 注册或登录账号\n"
+                "2. 进入 Deposit 页面\n"
+                "3. 选择 payment method 并完成付款\n"
+                "4. 完成后发送 deposit screenshot 给客服检查"
+            ),
+        },
+        "faq_redeem": {
+            "ms": (
+                "🎟 Cara Tebus Reward\n\n"
+                "1. Kumpul points melalui Check In / Share / Deposit Mission\n"
+                "2. Tekan Kumpul Rewards / Redeem Reward\n"
+                "3. Pilih reward yang anda mahu tebus\n"
+                "4. Tunggu Admin semak dan approve\n\n"
+                "Customer service boleh bantu semak status pending redeem."
+            ),
+            "en": (
+                "🎟 Redeem Reward Guide\n\n"
+                "1. Collect points through Check In / Share / Deposit Mission\n"
+                "2. Tap Kumpul Rewards / Redeem Reward\n"
+                "3. Choose the reward you want to redeem\n"
+                "4. Wait for Admin review and approval\n\n"
+                "Customer service can help check your pending redeem status."
+            ),
+            "zh": (
+                "🎟 Reward 兑换说明\n\n"
+                "1. 先通过 Check In / Share / Deposit Mission 收集 points\n"
+                "2. 点 Kumpul Rewards / Redeem Reward\n"
+                "3. 选择你要换的奖励\n"
+                "4. 等待 Admin 审核\n\n"
+                "客服可以帮你查看 pending redeem 状态。"
+            ),
+        },
+        "faq_phone": {
+            "ms": (
+                "📱 Cara Sahkan Nombor Telefon\n\n"
+                "Tekan butang Verify Malaysia Number dan kongsi nombor Telegram anda.\n"
+                "Sistem hanya menerima nombor telefon Malaysia.\n\n"
+                "Jika butang tidak nampak, tekan /start untuk mula semula."
+            ),
+            "en": (
+                "📱 Phone Verification Guide\n\n"
+                "Tap the Verify Malaysia Number button and share your Telegram phone number.\n"
+                "The system only accepts Malaysia phone numbers.\n\n"
+                "If the button is missing, press /start to restart."
+            ),
+            "zh": (
+                "📱 手机验证说明\n\n"
+                "请点击 Verify Malaysia Number 按钮，分享你的 Telegram 电话号码。\n"
+                "系统只接受 Malaysia 手机号码。\n\n"
+                "如果按钮不见了，请输入 /start 重新开始。"
+            ),
+        },
+    }
     if data == "faq_talk":
         return support_intro_text(user_id)
-    return support_intro_text(user_id)
-
+    return (answers.get(data) or {}).get(lang) or (answers.get(data) or {}).get("ms") or support_intro_text(user_id)
 
 def support_main_buttons(target_user_id):
     target_user_id = str(target_user_id)
@@ -1668,7 +1811,11 @@ async def relay_customer_to_support(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.exception("relay_customer_to_support failed: %s", e)
         try:
-            await update.effective_message.reply_text("⚠️ Customer service is busy. Please try again later.")
+            await update.effective_message.reply_text({
+                "ms": "⚠️ Customer service sedang sibuk. Sila cuba lagi nanti.",
+                "en": "⚠️ Customer service is busy. Please try again later.",
+                "zh": "⚠️ 客服暂时繁忙，请稍后再试。",
+            }.get(support_lang(user_id), "⚠️ Customer service is busy. Please try again later."))
         except Exception:
             pass
     return False
@@ -1874,7 +2021,8 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
             audit_log(query.from_user.id, "support_status", f"target={target_user_id} status={status}")
 
         elif action in SUPPORT_QUICK_REPLIES:
-            label, reply_text = SUPPORT_QUICK_REPLIES[action]
+            label = support_quick_reply_label(action)
+            reply_text = support_quick_reply_text(action, target_user_id)
 
             # Close Chat only closes the ticket in the support group.
             # It does NOT send any message to the customer.
