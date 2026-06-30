@@ -506,8 +506,8 @@ SUPPORT_QUICK_REPLIES = {
         "Boss，客服正在帮你检查，请稍等一下。",
     ),
     "sup_qr_done": (
-        "✅ Done Reply",
-        "Boss，已经处理好了，谢谢。",
+        "✅ Close Chat",
+        "",
     ),
 }
 
@@ -818,7 +818,7 @@ def support_quick_reply_buttons(target_user_id):
         ],
         [
             InlineKeyboardButton("⏳ Please Wait", callback_data=f"sup_qr_wait:{target_user_id}"),
-            InlineKeyboardButton("✅ Done Reply", callback_data=f"sup_qr_done:{target_user_id}"),
+            InlineKeyboardButton("✅ Close Chat", callback_data=f"sup_qr_done:{target_user_id}"),
         ],
         [
             InlineKeyboardButton("⬅️ Hide", callback_data=f"sup_hide:{target_user_id}"),
@@ -1501,7 +1501,10 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
             label = SUPPORT_STATUS_LABELS.get(status, status)
             if final_status == "done":
                 await support_close_visible_message(context, target_user_id, source_message=query.message)
-                await query.message.reply_text(f"✅ Closed. Check back anytime: /chatlog {target_user_id}")
+                try:
+                    await query.answer("✅ Chat closed")
+                except Exception:
+                    pass
             else:
                 await query.message.reply_text(
                     "📌 Ticket Updated\n\n"
@@ -1513,6 +1516,25 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
 
         elif action in SUPPORT_QUICK_REPLIES:
             label, reply_text = SUPPORT_QUICK_REPLIES[action]
+
+            # Close Chat only closes the ticket in the support group.
+            # It does NOT send any message to the customer.
+            if action == "sup_qr_done":
+                support_touch_ticket(
+                    target_user_id,
+                    status="done",
+                    assigned_to=query.from_user.id,
+                    assigned_name=query.from_user.full_name,
+                    closed_by=query.from_user.id,
+                )
+                await support_close_visible_message(context, target_user_id, source_message=query.message)
+                try:
+                    await query.answer("✅ Chat closed")
+                except Exception:
+                    pass
+                audit_log(query.from_user.id, "support_close_no_customer_reply", f"target={target_user_id}")
+                return
+
             sent, log_id = await support_send_text_to_customer(
                 context,
                 target_user_id,
@@ -1521,25 +1543,16 @@ async def handle_support_callback(query, data: str, context: ContextTypes.DEFAUL
                 admin_name=query.from_user.full_name,
                 action=action,
             )
-            new_status = "done" if action == "sup_qr_done" else "replied"
             support_touch_ticket(
                 target_user_id,
-                status=new_status,
+                status="replied",
                 assigned_to=query.from_user.id,
                 assigned_name=query.from_user.full_name,
-                closed_by=query.from_user.id if new_status == "done" else None,
             )
-            if action == "sup_qr_done":
-                await support_close_visible_message(context, target_user_id, source_message=query.message)
-                await query.message.reply_text(
-                    f"✅ Done reply sent and chat closed.\nCheck back: /chatlog {target_user_id}",
-                    reply_markup=support_recall_keyboard(log_id),
-                )
-            else:
-                await query.message.reply_text(
-                    f"✅ Quick reply sent: {label}",
-                    reply_markup=support_recall_keyboard(log_id),
-                )
+            await query.message.reply_text(
+                f"✅ Quick reply sent: {label}",
+                reply_markup=support_recall_keyboard(log_id),
+            )
 
         elif action == "sup_ban":
             set_user_banned(target_user_id, True)
